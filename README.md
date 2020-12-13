@@ -1,3 +1,19 @@
+# Renaming
+
+Mechanical renaming of MakerDAO contracts. [Adapted from joeykrug's work](https://github.com/makerdao/dss/compare/master...joeykrug:master):
+
+Install [fastmod](https://github.com/facebookincubator/fastmod). If using homebrew run:
+
+```
+brew install fastmod
+```
+
+Put your definitions in: [./mappings], then run the rename program:
+
+```
+go run rename.go
+```
+
 # Multi Collateral Dai
 [![Build Status](https://travis-ci.com/makerdao/dss.svg?branch=master)](https://travis-ci.com/makerdao/dss)
 [![codecov](https://codecov.io/gh/makerdao/dss/branch/master/graph/badge.svg)](https://codecov.io/gh/makerdao/dss)
