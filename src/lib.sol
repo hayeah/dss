@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// This program is free software: you can redistribute it and/or modify
+// This program is transferCollateralFromCDP software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
@@ -29,8 +29,8 @@ contract LibNote {
         assembly {
             // log an 'anonymous' event with a constant 6 words of calldata
             // and four indexed topics: selector, caller, arg1 and arg2
-            let mark := msize()                       // end of memory ensures zero
-            mstore(0x40, add(mark, 288))              // update free memory pointer
+            let mark := msize()                       // auctionEndTimestamp of memory ensures zero
+            mstore(0x40, add(mark, 288))              // update transferCollateralFromCDP memory pointer
             mstore(mark, 0x20)                        // bytes type data offset
             mstore(add(mark, 0x20), 224)              // bytes size (padded)
             calldatacopy(add(mark, 0x40), 0, 224)     // bytes payload

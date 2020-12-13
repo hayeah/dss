@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-/// end.sol -- global settlement engine
+/// auctionEndTimestamp.sol -- global settlement engine
 
 // Copyright (C) 2018 Rain <rainbreak@riseup.net>
 // Copyright (C) 2018 Lev Livnev <lev@liv.nev.org.uk>
 //
-// This program is free software: you can redistribute it and/or modify
+// This program is transferCollateralFromCDP software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
@@ -22,53 +22,53 @@ pragma solidity >=0.5.12;
 
 import "./lib.sol";
 
-interface VatLike {
+interface CDPCoreInterface {
     function dai(address) external view returns (uint256);
-    function ilks(bytes32 ilk) external returns (
-        uint256 Art,   // [wad]
-        uint256 rate,  // [ray]
-        uint256 spot,  // [ray]
-        uint256 line,  // [rad]
-        uint256 dust   // [rad]
+    function collateralTypes(bytes32 collateralType) external returns (
+        uint256 totalStablecoinDebt,   // [fxp18Int]
+        uint256 debtMultiplierIncludingStabilityFee,  // [fxp27Int]
+        uint256 maxDaiPerUnitOfCollateral,  // [fxp27Int]
+        uint256 debtCeiling,  // [fxp45Int]
+        uint256 dust   // [fxp45Int]
     );
-    function urns(bytes32 ilk, address urn) external returns (
-        uint256 ink,   // [wad]
-        uint256 art    // [wad]
+    function cdps(bytes32 collateralType, address cdp) external returns (
+        uint256 collateralBalance,   // [fxp18Int]
+        uint256 stablecoinDebt    // [fxp18Int]
     );
     function debt() external returns (uint256);
-    function move(address src, address dst, uint256 rad) external;
-    function hope(address) external;
-    function flux(bytes32 ilk, address src, address dst, uint256 rad) external;
-    function grab(bytes32 i, address u, address v, address w, int256 dink, int256 dart) external;
-    function suck(address u, address v, uint256 rad) external;
-    function cage() external;
+    function transfer(address src, address dst, uint256 fxp45Int) external;
+    function grantAccess(address) external;
+    function transferCollateral(bytes32 collateralType, address src, address dst, uint256 fxp45Int) external;
+    function liquidateCDP(bytes32 i, address u, address v, address w, int256 changeInCollateral, int256 changeInDebt) external;
+    function issueBadDebt(address u, address v, uint256 fxp45Int) external;
+    function disable() external;
 }
 interface CatLike {
-    function ilks(bytes32) external returns (
-        address flip,
-        uint256 chop,  // [ray]
-        uint256 lump   // [rad]
+    function collateralTypes(bytes32) external returns (
+        address collateralForDaiAuction,
+        uint256 liquidationPenalty,  // [fxp27Int]
+        uint256 liquidationQuantity   // [fxp45Int]
     );
-    function cage() external;
+    function disable() external;
 }
 interface PotLike {
-    function cage() external;
+    function disable() external;
 }
-interface VowLike {
-    function cage() external;
+interface SettlementInterface {
+    function disable() external;
 }
 interface Flippy {
     function bids(uint id) external view returns (
-        uint256 bid,   // [rad]
-        uint256 lot,   // [wad]
-        address guy,
-        uint48  tic,   // [unix epoch time]
-        uint48  end,   // [unix epoch time]
+        uint256 bid,   // [fxp45Int]
+        uint256 lot,   // [fxp18Int]
+        address highBidder,
+        uint48  bidExpiry,   // [unix epoch time]
+        uint48  auctionEndTimestamp,   // [unix epoch time]
         address usr,
-        address gal,
-        uint256 tab    // [rad]
+        address incomeRecipient,
+        uint256 tab    // [fxp45Int]
     );
-    function yank(uint id) external;
+    function closeBid(uint id) external;
 }
 
 interface PipLike {
@@ -77,27 +77,27 @@ interface PipLike {
 
 interface Spotty {
     function par() external view returns (uint256);
-    function ilks(bytes32) external view returns (
+    function collateralTypes(bytes32) external view returns (
         PipLike pip,
-        uint256 mat    // [ray]
+        uint256 mat    // [fxp27Int]
     );
-    function cage() external;
+    function disable() external;
 }
 
 /*
     This is the `End` and it coordinates Global Settlement. This is an
     involved, stateful process that takes place over nine steps.
 
-    First we freeze the system and lock the prices for each ilk.
+    First we freeze the system and transferCollateralToCDP the prices for each collateralType.
 
-    1. `cage()`:
+    1. `disable()`:
         - freezes user entrypoints
         - cancels flop/flap auctions
         - starts cooldown period
         - stops pot drips
 
-    2. `cage(ilk)`:
-       - set the cage price for each `ilk`, reading off the price feed
+    2. `disable(collateralType)`:
+       - set the disable price for each `collateralType`, reading off the price feed
 
     We must process some system state before it is possible to calculate
     the final dai / collateral price. In particular, we need to determine
@@ -111,7 +111,7 @@ interface Spotty {
     We determine (a) by processing all under-collateralised CDPs with
     `skim`:
 
-    3. `skim(ilk, urn)`:
+    3. `skim(collateralType, cdp)`:
        - cancels CDP debt
        - any excess collateral remains
        - backing collateral taken
@@ -119,12 +119,12 @@ interface Spotty {
     We determine (b) by processing ongoing dai generating processes,
     i.e. auctions. We need to ensure that auctions will not generate any
     further dai income. In the two-way auction model this occurs when
-    all auctions are in the reverse (`dent`) phase. There are two ways
+    all auctions are in the reverse (`makeBidDecreaseLotSize`) phase. There are two ways
     of ensuring this:
 
-    4.  i) `wait`: set the cooldown period to be at least as long as the
+    4.  i) `debtQueueLength`: set the cooldown period to be at least as long as the
            longest auction duration, which needs to be determined by the
-           cage administrator.
+           disable administrator.
 
            This takes a fairly predictable time to occur but with altered
            auction dynamics due to the now varying price of dai.
@@ -135,12 +135,12 @@ interface Spotty {
            processing calls. This option allows dai holders to retrieve
            their collateral faster.
 
-           `skip(ilk, id)`:
-            - cancel individual flip auctions in the `tend` (forward) phase
+           `skip(collateralType, id)`:
+            - cancel individual collateralForDaiAuction auctions in the `makeBidIncreaseBidSize` (forward) phase
             - retrieves collateral and returns dai to bidder
-            - `dent` (reverse) phase auctions can continue normally
+            - `makeBidDecreaseLotSize` (reverse) phase auctions can continue normally
 
-    Option (i), `wait`, is sufficient for processing the system
+    Option (i), `debtQueueLength`, is sufficient for processing the system
     settlement but option (ii), `skip`, will speed it up. Both options
     are available in this implementation, with `skip` being enabled on a
     per-auction basis.
@@ -148,7 +148,7 @@ interface Spotty {
     When a CDP has been processed and has no debt remaining, the
     remaining collateral can be removed.
 
-    5. `free(ilk)`:
+    5. `transferCollateralFromCDP(collateralType)`:
         - remove collateral from the caller's CDP
         - owner can call as needed
 
@@ -159,10 +159,10 @@ interface Spotty {
        - only callable after processing time period elapsed
        - assumption that all under-collateralised CDPs are processed
        - fixes the total outstanding supply of dai
-       - may also require extra CDP processing to cover vow surplus
+       - may also require extra CDP processing to cover settlement surplus
 
-    7. `flow(ilk)`:
-        - calculate the `fix`, the cash price for a given ilk
+    7. `flow(collateralType)`:
+        - calculate the `fix`, the cash price for a given collateralType
         - adjusts the `fix` in the case of deficit / surplus
 
     At this point we have computed the final price for each collateral
@@ -173,51 +173,51 @@ interface Spotty {
     dai cannot be unpacked and is not transferrable. More dai can be
     added to a bag later.
 
-    8. `pack(wad)`:
+    8. `pack(fxp18Int)`:
         - put some dai into a bag in preparation for `cash`
 
     Finally, collateral can be obtained with `cash`. The bigger the bag,
     the more collateral can be released.
 
-    9. `cash(ilk, wad)`:
-        - exchange some dai from your bag for gems from a specific ilk
-        - the number of gems is limited by how big your bag is
+    9. `cash(collateralType, fxp18Int)`:
+        - exchange some dai from your bag for collateralTokens from a specific collateralType
+        - the number of collateralTokens is limited by how big your bag is
 */
 
 contract End is LibNote {
     // --- Auth ---
-    mapping (address => uint) public wards;
-    function rely(address guy) external note auth { wards[guy] = 1; }
-    function deny(address guy) external note auth { wards[guy] = 0; }
-    modifier auth {
-        require(wards[msg.sender] == 1, "End/not-authorized");
+    mapping (address => uint) public auths;
+    function authorizeAddress(address highBidder) external note isAuthorized { auths[highBidder] = 1; }
+    function deauthorizeAddress(address highBidder) external note isAuthorized { auths[highBidder] = 0; }
+    modifier isAuthorized {
+        require(auths[msg.sender] == 1, "End/not-authorized");
         _;
     }
 
     // --- Data ---
-    VatLike  public vat;   // CDP Engine
+    CDPCoreInterface  public cdpCore;   // CDP Engine
     CatLike  public cat;
-    VowLike  public vow;   // Debt Engine
+    SettlementInterface  public settlement;   // Debt Engine
     PotLike  public pot;
-    Spotty   public spot;
+    Spotty   public maxDaiPerUnitOfCollateral;
 
-    uint256  public live;  // Active Flag
-    uint256  public when;  // Time of cage                   [unix epoch time]
-    uint256  public wait;  // Processing Cooldown Length             [seconds]
-    uint256  public debt;  // Total outstanding dai following processing [rad]
+    uint256  public isAlive;  // Active Flag
+    uint256  public when;  // Time of disable                   [unix epoch time]
+    uint256  public debtQueueLength;  // Processing Cooldown Length             [seconds]
+    uint256  public debt;  // Total outstanding dai following processing [fxp45Int]
 
-    mapping (bytes32 => uint256) public tag;  // Cage price              [ray]
-    mapping (bytes32 => uint256) public gap;  // Collateral shortfall    [wad]
-    mapping (bytes32 => uint256) public Art;  // Total debt per ilk      [wad]
-    mapping (bytes32 => uint256) public fix;  // Final cash price        [ray]
+    mapping (bytes32 => uint256) public tag;  // Cage price              [fxp27Int]
+    mapping (bytes32 => uint256) public gap;  // Collateral shortfall    [fxp18Int]
+    mapping (bytes32 => uint256) public totalStablecoinDebt;  // Total debt per collateralType      [fxp18Int]
+    mapping (bytes32 => uint256) public fix;  // Final cash price        [fxp27Int]
 
-    mapping (address => uint256)                      public bag;  //    [wad]
-    mapping (bytes32 => mapping (address => uint256)) public out;  //    [wad]
+    mapping (address => uint256)                      public bag;  //    [fxp18Int]
+    mapping (bytes32 => mapping (address => uint256)) public out;  //    [fxp18Int]
 
     // --- Init ---
     constructor() public {
-        wards[msg.sender] = 1;
-        live = 1;
+        auths[msg.sender] = 1;
+        isAlive = 1;
     }
 
     // --- Math ---
@@ -247,107 +247,107 @@ contract End is LibNote {
     }
 
     // --- Administration ---
-    function file(bytes32 what, address data) external note auth {
-        require(live == 1, "End/not-live");
-        if (what == "vat")  vat = VatLike(data);
+    function changeConfig(bytes32 what, address data) external note isAuthorized {
+        require(isAlive == 1, "End/not-isAlive");
+        if (what == "cdpCore")  cdpCore = CDPCoreInterface(data);
         else if (what == "cat")  cat = CatLike(data);
-        else if (what == "vow")  vow = VowLike(data);
+        else if (what == "settlement")  settlement = SettlementInterface(data);
         else if (what == "pot")  pot = PotLike(data);
-        else if (what == "spot") spot = Spotty(data);
-        else revert("End/file-unrecognized-param");
+        else if (what == "maxDaiPerUnitOfCollateral") maxDaiPerUnitOfCollateral = Spotty(data);
+        else revert("End/changeConfig-unrecognized-param");
     }
-    function file(bytes32 what, uint256 data) external note auth {
-        require(live == 1, "End/not-live");
-        if (what == "wait") wait = data;
-        else revert("End/file-unrecognized-param");
+    function changeConfig(bytes32 what, uint256 data) external note isAuthorized {
+        require(isAlive == 1, "End/not-isAlive");
+        if (what == "debtQueueLength") debtQueueLength = data;
+        else revert("End/changeConfig-unrecognized-param");
     }
 
     // --- Settlement ---
-    function cage() external note auth {
-        require(live == 1, "End/not-live");
-        live = 0;
+    function disable() external note isAuthorized {
+        require(isAlive == 1, "End/not-isAlive");
+        isAlive = 0;
         when = now;
-        vat.cage();
-        cat.cage();
-        vow.cage();
-        spot.cage();
-        pot.cage();
+        cdpCore.disable();
+        cat.disable();
+        settlement.disable();
+        maxDaiPerUnitOfCollateral.disable();
+        pot.disable();
     }
 
-    function cage(bytes32 ilk) external note {
-        require(live == 0, "End/still-live");
-        require(tag[ilk] == 0, "End/tag-ilk-already-defined");
-        (Art[ilk],,,,) = vat.ilks(ilk);
-        (PipLike pip,) = spot.ilks(ilk);
-        // par is a ray, pip returns a wad
-        tag[ilk] = wdiv(spot.par(), uint(pip.read()));
+    function disable(bytes32 collateralType) external note {
+        require(isAlive == 0, "End/still-isAlive");
+        require(tag[collateralType] == 0, "End/tag-collateralType-already-defined");
+        (totalStablecoinDebt[collateralType],,,,) = cdpCore.collateralTypes(collateralType);
+        (PipLike pip,) = maxDaiPerUnitOfCollateral.collateralTypes(collateralType);
+        // par is a fxp27Int, pip returns a fxp18Int
+        tag[collateralType] = wdiv(maxDaiPerUnitOfCollateral.par(), uint(pip.read()));
     }
 
-    function skip(bytes32 ilk, uint256 id) external note {
-        require(tag[ilk] != 0, "End/tag-ilk-not-defined");
+    function skip(bytes32 collateralType, uint256 id) external note {
+        require(tag[collateralType] != 0, "End/tag-collateralType-not-defined");
 
-        (address flipV,,) = cat.ilks(ilk);
-        Flippy flip = Flippy(flipV);
-        (, uint rate,,,) = vat.ilks(ilk);
-        (uint bid, uint lot,,,, address usr,, uint tab) = flip.bids(id);
+        (address flipV,,) = cat.collateralTypes(collateralType);
+        Flippy collateralForDaiAuction = Flippy(flipV);
+        (, uint debtMultiplierIncludingStabilityFee,,,) = cdpCore.collateralTypes(collateralType);
+        (uint bid, uint lot,,,, address usr,, uint tab) = collateralForDaiAuction.bids(id);
 
-        vat.suck(address(vow), address(vow),  tab);
-        vat.suck(address(vow), address(this), bid);
-        vat.hope(address(flip));
-        flip.yank(id);
+        cdpCore.issueBadDebt(address(settlement), address(settlement),  tab);
+        cdpCore.issueBadDebt(address(settlement), address(this), bid);
+        cdpCore.grantAccess(address(collateralForDaiAuction));
+        collateralForDaiAuction.closeBid(id);
 
-        uint art = tab / rate;
-        Art[ilk] = add(Art[ilk], art);
-        require(int(lot) >= 0 && int(art) >= 0, "End/overflow");
-        vat.grab(ilk, usr, address(this), address(vow), int(lot), int(art));
+        uint stablecoinDebt = tab / debtMultiplierIncludingStabilityFee;
+        totalStablecoinDebt[collateralType] = add(totalStablecoinDebt[collateralType], stablecoinDebt);
+        require(int(lot) >= 0 && int(stablecoinDebt) >= 0, "End/overflow");
+        cdpCore.liquidateCDP(collateralType, usr, address(this), address(settlement), int(lot), int(stablecoinDebt));
     }
 
-    function skim(bytes32 ilk, address urn) external note {
-        require(tag[ilk] != 0, "End/tag-ilk-not-defined");
-        (, uint rate,,,) = vat.ilks(ilk);
-        (uint ink, uint art) = vat.urns(ilk, urn);
+    function skim(bytes32 collateralType, address cdp) external note {
+        require(tag[collateralType] != 0, "End/tag-collateralType-not-defined");
+        (, uint debtMultiplierIncludingStabilityFee,,,) = cdpCore.collateralTypes(collateralType);
+        (uint collateralBalance, uint stablecoinDebt) = cdpCore.cdps(collateralType, cdp);
 
-        uint owe = rmul(rmul(art, rate), tag[ilk]);
-        uint wad = min(ink, owe);
-        gap[ilk] = add(gap[ilk], sub(owe, wad));
+        uint owe = rmul(rmul(stablecoinDebt, debtMultiplierIncludingStabilityFee), tag[collateralType]);
+        uint fxp18Int = min(collateralBalance, owe);
+        gap[collateralType] = add(gap[collateralType], sub(owe, fxp18Int));
 
-        require(wad <= 2**255 && art <= 2**255, "End/overflow");
-        vat.grab(ilk, urn, address(this), address(vow), -int(wad), -int(art));
+        require(fxp18Int <= 2**255 && stablecoinDebt <= 2**255, "End/overflow");
+        cdpCore.liquidateCDP(collateralType, cdp, address(this), address(settlement), -int(fxp18Int), -int(stablecoinDebt));
     }
 
-    function free(bytes32 ilk) external note {
-        require(live == 0, "End/still-live");
-        (uint ink, uint art) = vat.urns(ilk, msg.sender);
-        require(art == 0, "End/art-not-zero");
-        require(ink <= 2**255, "End/overflow");
-        vat.grab(ilk, msg.sender, msg.sender, address(vow), -int(ink), 0);
+    function transferCollateralFromCDP(bytes32 collateralType) external note {
+        require(isAlive == 0, "End/still-isAlive");
+        (uint collateralBalance, uint stablecoinDebt) = cdpCore.cdps(collateralType, msg.sender);
+        require(stablecoinDebt == 0, "End/stablecoinDebt-not-zero");
+        require(collateralBalance <= 2**255, "End/overflow");
+        cdpCore.liquidateCDP(collateralType, msg.sender, msg.sender, address(settlement), -int(collateralBalance), 0);
     }
 
     function thaw() external note {
-        require(live == 0, "End/still-live");
+        require(isAlive == 0, "End/still-isAlive");
         require(debt == 0, "End/debt-not-zero");
-        require(vat.dai(address(vow)) == 0, "End/surplus-not-zero");
-        require(now >= add(when, wait), "End/wait-not-finished");
-        debt = vat.debt();
+        require(cdpCore.dai(address(settlement)) == 0, "End/surplus-not-zero");
+        require(now >= add(when, debtQueueLength), "End/debtQueueLength-not-finished");
+        debt = cdpCore.debt();
     }
-    function flow(bytes32 ilk) external note {
+    function flow(bytes32 collateralType) external note {
         require(debt != 0, "End/debt-zero");
-        require(fix[ilk] == 0, "End/fix-ilk-already-defined");
+        require(fix[collateralType] == 0, "End/fix-collateralType-already-defined");
 
-        (, uint rate,,,) = vat.ilks(ilk);
-        uint256 wad = rmul(rmul(Art[ilk], rate), tag[ilk]);
-        fix[ilk] = rdiv(mul(sub(wad, gap[ilk]), RAY), debt);
+        (, uint debtMultiplierIncludingStabilityFee,,,) = cdpCore.collateralTypes(collateralType);
+        uint256 fxp18Int = rmul(rmul(totalStablecoinDebt[collateralType], debtMultiplierIncludingStabilityFee), tag[collateralType]);
+        fix[collateralType] = rdiv(mul(sub(fxp18Int, gap[collateralType]), RAY), debt);
     }
 
-    function pack(uint256 wad) external note {
+    function pack(uint256 fxp18Int) external note {
         require(debt != 0, "End/debt-zero");
-        vat.move(msg.sender, address(vow), mul(wad, RAY));
-        bag[msg.sender] = add(bag[msg.sender], wad);
+        cdpCore.transfer(msg.sender, address(settlement), mul(fxp18Int, RAY));
+        bag[msg.sender] = add(bag[msg.sender], fxp18Int);
     }
-    function cash(bytes32 ilk, uint wad) external note {
-        require(fix[ilk] != 0, "End/fix-ilk-not-defined");
-        vat.flux(ilk, address(this), msg.sender, rmul(wad, fix[ilk]));
-        out[ilk][msg.sender] = add(out[ilk][msg.sender], wad);
-        require(out[ilk][msg.sender] <= bag[msg.sender], "End/insufficient-bag-balance");
+    function cash(bytes32 collateralType, uint fxp18Int) external note {
+        require(fix[collateralType] != 0, "End/fix-collateralType-not-defined");
+        cdpCore.transferCollateral(collateralType, address(this), msg.sender, rmul(fxp18Int, fix[collateralType]));
+        out[collateralType][msg.sender] = add(out[collateralType][msg.sender], fxp18Int);
+        require(out[collateralType][msg.sender] <= bag[msg.sender], "End/insufficient-bag-balance");
     }
 }

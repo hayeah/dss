@@ -4,7 +4,7 @@
 
 // Copyright (C) 2018 Rain <rainbreak@riseup.net>
 //
-// This program is free software: you can redistribute it and/or modify
+// This program is transferCollateralFromCDP software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
@@ -31,51 +31,51 @@ import "./lib.sol";
 
          --- `save` your `dai` in the `pot` ---
 
-   - `dsr`: the Dai Savings Rate
-   - `pie`: user balance of Savings Dai
+   - `daiSavingRate`: the Dai Savings Rate
+   - `daiSavings`: user balance of Savings Dai
 
-   - `join`: start saving some dai
+   - `deposit`: start saving some dai
    - `exit`: remove some dai
-   - `drip`: perform rate collection
+   - `increaseStabilityFee`: perform debtMultiplierIncludingStabilityFee collection
 
 */
 
-interface VatLike {
-    function move(address,address,uint256) external;
-    function suck(address,address,uint256) external;
+interface CDPCoreInterface {
+    function transfer(address,address,uint256) external;
+    function issueBadDebt(address,address,uint256) external;
 }
 
-contract Pot is LibNote {
+contract Savings is LibNote {
     // --- Auth ---
-    mapping (address => uint) public wards;
-    function rely(address guy) external note auth { wards[guy] = 1; }
-    function deny(address guy) external note auth { wards[guy] = 0; }
-    modifier auth {
-        require(wards[msg.sender] == 1, "Pot/not-authorized");
+    mapping (address => uint) public auths;
+    function authorizeAddress(address highBidder) external note isAuthorized { auths[highBidder] = 1; }
+    function deauthorizeAddress(address highBidder) external note isAuthorized { auths[highBidder] = 0; }
+    modifier isAuthorized {
+        require(auths[msg.sender] == 1, "Savings/not-authorized");
         _;
     }
 
     // --- Data ---
-    mapping (address => uint256) public pie;  // Normalised Savings Dai [wad]
+    mapping (address => uint256) public daiSavings;  // Normalised Savings Dai [fxp18Int]
 
-    uint256 public Pie;   // Total Normalised Savings Dai  [wad]
-    uint256 public dsr;   // The Dai Savings Rate          [ray]
-    uint256 public chi;   // The Rate Accumulator          [ray]
+    uint256 public totalDaiSavings;   // Total Normalised Savings Dai  [fxp18Int]
+    uint256 public daiSavingRate;   // The Dai Savings Rate          [fxp27Int]
+    uint256 public rateAccum;   // The Rate Accumulator          [fxp27Int]
 
-    VatLike public vat;   // CDP Engine
-    address public vow;   // Debt Engine
-    uint256 public rho;   // Time of last drip     [unix epoch time]
+    CDPCoreInterface public cdpCore;   // CDP Engine
+    address public settlement;   // Debt Engine
+    uint256 public collateralTypeLastStabilityFeeCollectionTimestamp;   // Time of last increaseStabilityFee     [unix epoch time]
 
-    uint256 public live;  // Active Flag
+    uint256 public isAlive;  // Active Flag
 
     // --- Init ---
-    constructor(address vat_) public {
-        wards[msg.sender] = 1;
-        vat = VatLike(vat_);
-        dsr = ONE;
-        chi = ONE;
-        rho = now;
-        live = 1;
+    constructor(address core_) public {
+        auths[msg.sender] = 1;
+        cdpCore = CDPCoreInterface(core_);
+        daiSavingRate = ONE;
+        rateAccum = ONE;
+        collateralTypeLastStabilityFeeCollectionTimestamp = now;
+        isAlive = 1;
     }
 
     // --- Math ---
@@ -121,44 +121,44 @@ contract Pot is LibNote {
     }
 
     // --- Administration ---
-    function file(bytes32 what, uint256 data) external note auth {
-        require(live == 1, "Pot/not-live");
-        require(now == rho, "Pot/rho-not-updated");
-        if (what == "dsr") dsr = data;
-        else revert("Pot/file-unrecognized-param");
+    function changeConfig(bytes32 what, uint256 data) external note isAuthorized {
+        require(isAlive == 1, "Savings/not-isAlive");
+        require(now == collateralTypeLastStabilityFeeCollectionTimestamp, "Savings/collateralTypeLastStabilityFeeCollectionTimestamp-not-updated");
+        if (what == "daiSavingRate") daiSavingRate = data;
+        else revert("Savings/changeConfig-unrecognized-param");
     }
 
-    function file(bytes32 what, address addr) external note auth {
-        if (what == "vow") vow = addr;
-        else revert("Pot/file-unrecognized-param");
+    function changeConfig(bytes32 what, address highBidder) external note isAuthorized {
+        if (what == "settlement") settlement = highBidder;
+        else revert("Savings/changeConfig-unrecognized-param");
     }
 
-    function cage() external note auth {
-        live = 0;
-        dsr = ONE;
+    function disable() external note isAuthorized {
+        isAlive = 0;
+        daiSavingRate = ONE;
     }
 
     // --- Savings Rate Accumulation ---
-    function drip() external note returns (uint tmp) {
-        require(now >= rho, "Pot/invalid-now");
-        tmp = rmul(rpow(dsr, now - rho, ONE), chi);
-        uint chi_ = sub(tmp, chi);
-        chi = tmp;
-        rho = now;
-        vat.suck(address(vow), address(this), mul(Pie, chi_));
+    function increaseStabilityFee() external note returns (uint tmp) {
+        require(now >= collateralTypeLastStabilityFeeCollectionTimestamp, "Savings/invalid-now");
+        tmp = rmul(rpow(daiSavingRate, now - collateralTypeLastStabilityFeeCollectionTimestamp, ONE), rateAccum);
+        uint chi_ = sub(tmp, rateAccum);
+        rateAccum = tmp;
+        collateralTypeLastStabilityFeeCollectionTimestamp = now;
+        cdpCore.issueBadDebt(address(settlement), address(this), mul(totalDaiSavings, chi_));
     }
 
     // --- Savings Dai Management ---
-    function join(uint wad) external note {
-        require(now == rho, "Pot/rho-not-updated");
-        pie[msg.sender] = add(pie[msg.sender], wad);
-        Pie             = add(Pie,             wad);
-        vat.move(msg.sender, address(this), mul(chi, wad));
+    function deposit(uint fxp18Int) external note {
+        require(now == collateralTypeLastStabilityFeeCollectionTimestamp, "Savings/collateralTypeLastStabilityFeeCollectionTimestamp-not-updated");
+        daiSavings[msg.sender] = add(daiSavings[msg.sender], fxp18Int);
+        totalDaiSavings             = add(totalDaiSavings,             fxp18Int);
+        cdpCore.transfer(msg.sender, address(this), mul(rateAccum, fxp18Int));
     }
 
-    function exit(uint wad) external note {
-        pie[msg.sender] = sub(pie[msg.sender], wad);
-        Pie             = sub(Pie,             wad);
-        vat.move(address(this), msg.sender, mul(chi, wad));
+    function exit(uint fxp18Int) external note {
+        daiSavings[msg.sender] = sub(daiSavings[msg.sender], fxp18Int);
+        totalDaiSavings             = sub(totalDaiSavings,             fxp18Int);
+        cdpCore.transfer(address(this), msg.sender, mul(rateAccum, fxp18Int));
     }
 }

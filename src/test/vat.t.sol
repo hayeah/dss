@@ -3,15 +3,15 @@ pragma solidity >=0.5.12;
 import "ds-test/test.sol";
 import "ds-token/token.sol";
 
-import {Vat} from '../vat.sol';
-import {Cat} from '../cat.sol';
-import {Vow} from '../vow.sol';
-import {Jug} from '../jug.sol';
-import {GemJoin, DaiJoin} from '../join.sol';
+import {CDPCore} from '../cdpCore.sol';
+import {Liquidation} from '../cat.sol';
+import {Settlement} from '../settlement.sol';
+import {Jug} from '../stabilityFeeDatabase.sol';
+import {GemJoin, DaiJoin} from '../deposit.sol';
 
-import {Flipper} from './flip.t.sol';
-import {Flopper} from './flop.t.sol';
-import {Flapper} from './flap.t.sol';
+import {Flipper} from './collateralForDaiAuction.t.sol';
+import {BadDebtAuction} from './flop.t.sol';
+import {SurplusAuction} from './flap.t.sol';
 
 
 interface Hevm {
@@ -19,260 +19,260 @@ interface Hevm {
     function store(address,bytes32,bytes32) external;
 }
 
-contract TestVat is Vat {
+contract TestVat is CDPCore {
     uint256 constant ONE = 10 ** 27;
-    function mint(address usr, uint wad) public {
-        dai[usr] += wad * ONE;
-        debt += wad * ONE;
+    function mint(address usr, uint fxp18Int) public {
+        dai[usr] += fxp18Int * ONE;
+        debt += fxp18Int * ONE;
     }
 }
 
-contract TestVow is Vow {
-    constructor(address vat, address flapper, address flopper)
-        public Vow(vat, flapper, flopper) {}
+contract TestVow is Settlement {
+    constructor(address cdpCore, address surplusAuction, address badDebtAuction)
+        public Settlement(cdpCore, surplusAuction, badDebtAuction) {}
     // Total deficit
-    function Awe() public view returns (uint) {
-        return vat.sin(address(this));
+    function totalDebt() public view returns (uint) {
+        return cdpCore.badDebt(address(this));
     }
     // Total surplus
-    function Joy() public view returns (uint) {
-        return vat.dai(address(this));
+    function totalSurplus() public view returns (uint) {
+        return cdpCore.dai(address(this));
     }
     // Unqueued, pre-auction debt
-    function Woe() public view returns (uint) {
-        return sub(sub(Awe(), Sin), Ash);
+    function totalNonQueuedNonAuctionDebt() public view returns (uint) {
+        return sub(sub(totalDebt(), totalDebtInDebtQueue), totalOnAuctionDebt);
     }
 }
 
 contract Usr {
-    Vat public vat;
-    constructor(Vat vat_) public {
-        vat = vat_;
+    CDPCore public cdpCore;
+    constructor(CDPCore core_) public {
+        cdpCore = core_;
     }
-    function try_call(address addr, bytes calldata data) external returns (bool) {
+    function try_call(address highBidder, bytes calldata data) external returns (bool) {
         bytes memory _data = data;
         assembly {
-            let ok := call(gas(), addr, 0, add(_data, 0x20), mload(_data), 0, 0)
-            let free := mload(0x40)
-            mstore(free, ok)
-            mstore(0x40, add(free, 32))
-            revert(free, 32)
+            let ok := call(gas(), highBidder, 0, add(_data, 0x20), mload(_data), 0, 0)
+            let transferCollateralFromCDP := mload(0x40)
+            mstore(transferCollateralFromCDP, ok)
+            mstore(0x40, add(transferCollateralFromCDP, 32))
+            revert(transferCollateralFromCDP, 32)
         }
     }
-    function can_frob(bytes32 ilk, address u, address v, address w, int dink, int dart) public returns (bool) {
-        string memory sig = "frob(bytes32,address,address,address,int256,int256)";
-        bytes memory data = abi.encodeWithSignature(sig, ilk, u, v, w, dink, dart);
+    function can_frob(bytes32 collateralType, address u, address v, address w, int changeInCollateral, int changeInDebt) public returns (bool) {
+        string memory sig = "modifyCDP(bytes32,address,address,address,int256,int256)";
+        bytes memory data = abi.encodeWithSignature(sig, collateralType, u, v, w, changeInCollateral, changeInDebt);
 
-        bytes memory can_call = abi.encodeWithSignature("try_call(address,bytes)", vat, data);
+        bytes memory can_call = abi.encodeWithSignature("try_call(address,bytes)", cdpCore, data);
         (bool ok, bytes memory success) = address(this).call(can_call);
 
         ok = abi.decode(success, (bool));
         if (ok) return true;
     }
-    function can_fork(bytes32 ilk, address src, address dst, int dink, int dart) public returns (bool) {
-        string memory sig = "fork(bytes32,address,address,int256,int256)";
-        bytes memory data = abi.encodeWithSignature(sig, ilk, src, dst, dink, dart);
+    function can_fork(bytes32 collateralType, address src, address dst, int changeInCollateral, int changeInDebt) public returns (bool) {
+        string memory sig = "transferCDP(bytes32,address,address,int256,int256)";
+        bytes memory data = abi.encodeWithSignature(sig, collateralType, src, dst, changeInCollateral, changeInDebt);
 
-        bytes memory can_call = abi.encodeWithSignature("try_call(address,bytes)", vat, data);
+        bytes memory can_call = abi.encodeWithSignature("try_call(address,bytes)", cdpCore, data);
         (bool ok, bytes memory success) = address(this).call(can_call);
 
         ok = abi.decode(success, (bool));
         if (ok) return true;
     }
-    function frob(bytes32 ilk, address u, address v, address w, int dink, int dart) public {
-        vat.frob(ilk, u, v, w, dink, dart);
+    function modifyCDP(bytes32 collateralType, address u, address v, address w, int changeInCollateral, int changeInDebt) public {
+        cdpCore.modifyCDP(collateralType, u, v, w, changeInCollateral, changeInDebt);
     }
-    function fork(bytes32 ilk, address src, address dst, int dink, int dart) public {
-        vat.fork(ilk, src, dst, dink, dart);
+    function transferCDP(bytes32 collateralType, address src, address dst, int changeInCollateral, int changeInDebt) public {
+        cdpCore.transferCDP(collateralType, src, dst, changeInCollateral, changeInDebt);
     }
-    function hope(address usr) public {
-        vat.hope(usr);
+    function grantAccess(address usr) public {
+        cdpCore.grantAccess(usr);
     }
 }
 
 
 contract FrobTest is DSTest {
-    TestVat vat;
+    TestVat cdpCore;
     DSToken gold;
-    Jug     jug;
+    Jug     stabilityFeeDatabase;
 
     GemJoin gemA;
     address me;
 
-    function try_frob(bytes32 ilk, int ink, int art) public returns (bool ok) {
-        string memory sig = "frob(bytes32,address,address,address,int256,int256)";
+    function try_frob(bytes32 collateralType, int collateralBalance, int stablecoinDebt) public returns (bool ok) {
+        string memory sig = "modifyCDP(bytes32,address,address,address,int256,int256)";
         address self = address(this);
-        (ok,) = address(vat).call(abi.encodeWithSignature(sig, ilk, self, self, self, ink, art));
+        (ok,) = address(cdpCore).call(abi.encodeWithSignature(sig, collateralType, self, self, self, collateralBalance, stablecoinDebt));
     }
 
-    function ray(uint wad) internal pure returns (uint) {
-        return wad * 10 ** 9;
+    function fxp27Int(uint fxp18Int) internal pure returns (uint) {
+        return fxp18Int * 10 ** 9;
     }
 
     function setUp() public {
-        vat = new TestVat();
+        cdpCore = new TestVat();
 
         gold = new DSToken("GEM");
         gold.mint(1000 ether);
 
-        vat.init("gold");
-        gemA = new GemJoin(address(vat), "gold", address(gold));
+        cdpCore.createNewCollateralType("gold");
+        gemA = new GemJoin(address(cdpCore), "gold", address(gold));
 
-        vat.file("gold", "spot",    ray(1 ether));
-        vat.file("gold", "line", rad(1000 ether));
-        vat.file("Line",         rad(1000 ether));
-        jug = new Jug(address(vat));
-        jug.init("gold");
-        vat.rely(address(jug));
+        cdpCore.changeConfig("gold", "maxDaiPerUnitOfCollateral",    fxp27Int(1 ether));
+        cdpCore.changeConfig("gold", "debtCeiling", fxp45Int(1000 ether));
+        cdpCore.changeConfig("totalDebtCeiling",         fxp45Int(1000 ether));
+        stabilityFeeDatabase = new Jug(address(cdpCore));
+        stabilityFeeDatabase.createNewCollateralType("gold");
+        cdpCore.authorizeAddress(address(stabilityFeeDatabase));
 
         gold.approve(address(gemA));
-        gold.approve(address(vat));
+        gold.approve(address(cdpCore));
 
-        vat.rely(address(vat));
-        vat.rely(address(gemA));
+        cdpCore.authorizeAddress(address(cdpCore));
+        cdpCore.authorizeAddress(address(gemA));
 
-        gemA.join(address(this), 1000 ether);
+        gemA.deposit(address(this), 1000 ether);
 
         me = address(this);
     }
 
-    function gem(bytes32 ilk, address urn) internal view returns (uint) {
-        return vat.gem(ilk, urn);
+    function collateralToken(bytes32 collateralType, address cdp) internal view returns (uint) {
+        return cdpCore.collateralToken(collateralType, cdp);
     }
-    function ink(bytes32 ilk, address urn) internal view returns (uint) {
-        (uint ink_, uint art_) = vat.urns(ilk, urn); art_;
+    function collateralBalance(bytes32 collateralType, address cdp) internal view returns (uint) {
+        (uint ink_, uint art_) = cdpCore.cdps(collateralType, cdp); art_;
         return ink_;
     }
-    function art(bytes32 ilk, address urn) internal view returns (uint) {
-        (uint ink_, uint art_) = vat.urns(ilk, urn); ink_;
+    function stablecoinDebt(bytes32 collateralType, address cdp) internal view returns (uint) {
+        (uint ink_, uint art_) = cdpCore.cdps(collateralType, cdp); ink_;
         return art_;
     }
 
     function test_setup() public {
         assertEq(gold.balanceOf(address(gemA)), 1000 ether);
-        assertEq(gem("gold",    address(this)), 1000 ether);
+        assertEq(collateralToken("gold",    address(this)), 1000 ether);
     }
     function test_join() public {
-        address urn = address(this);
+        address cdp = address(this);
         gold.mint(500 ether);
         assertEq(gold.balanceOf(address(this)),    500 ether);
         assertEq(gold.balanceOf(address(gemA)),   1000 ether);
-        gemA.join(urn,                             500 ether);
+        gemA.deposit(cdp,                             500 ether);
         assertEq(gold.balanceOf(address(this)),      0 ether);
         assertEq(gold.balanceOf(address(gemA)),   1500 ether);
-        gemA.exit(urn,                             250 ether);
+        gemA.exit(cdp,                             250 ether);
         assertEq(gold.balanceOf(address(this)),    250 ether);
         assertEq(gold.balanceOf(address(gemA)),   1250 ether);
     }
     function test_lock() public {
-        assertEq(ink("gold", address(this)),    0 ether);
-        assertEq(gem("gold", address(this)), 1000 ether);
-        vat.frob("gold", me, me, me, 6 ether, 0);
-        assertEq(ink("gold", address(this)),   6 ether);
-        assertEq(gem("gold", address(this)), 994 ether);
-        vat.frob("gold", me, me, me, -6 ether, 0);
-        assertEq(ink("gold", address(this)),    0 ether);
-        assertEq(gem("gold", address(this)), 1000 ether);
+        assertEq(collateralBalance("gold", address(this)),    0 ether);
+        assertEq(collateralToken("gold", address(this)), 1000 ether);
+        cdpCore.modifyCDP("gold", me, me, me, 6 ether, 0);
+        assertEq(collateralBalance("gold", address(this)),   6 ether);
+        assertEq(collateralToken("gold", address(this)), 994 ether);
+        cdpCore.modifyCDP("gold", me, me, me, -6 ether, 0);
+        assertEq(collateralBalance("gold", address(this)),    0 ether);
+        assertEq(collateralToken("gold", address(this)), 1000 ether);
     }
     function test_calm() public {
-        // calm means that the debt ceiling is not exceeded
-        // it's ok to increase debt as long as you remain calm
-        vat.file("gold", 'line', rad(10 ether));
+        // isCdpBelowCollateralAndTotalDebtCeilings means that the debt ceiling is not exceeded
+        // it's ok to increase debt as long as you remain isCdpBelowCollateralAndTotalDebtCeilings
+        cdpCore.changeConfig("gold", 'debtCeiling', fxp45Int(10 ether));
         assertTrue( try_frob("gold", 10 ether, 9 ether));
         // only if under debt ceiling
         assertTrue(!try_frob("gold",  0 ether, 2 ether));
     }
     function test_cool() public {
-        // cool means that the debt has decreased
-        // it's ok to be over the debt ceiling as long as you're cool
-        vat.file("gold", 'line', rad(10 ether));
+        // isCdpDaiDebtNonIncreasing means that the debt has decreased
+        // it's ok to be over the debt ceiling as long as you're isCdpDaiDebtNonIncreasing
+        cdpCore.changeConfig("gold", 'debtCeiling', fxp45Int(10 ether));
         assertTrue(try_frob("gold", 10 ether,  8 ether));
-        vat.file("gold", 'line', rad(5 ether));
+        cdpCore.changeConfig("gold", 'debtCeiling', fxp45Int(5 ether));
         // can decrease debt when over ceiling
         assertTrue(try_frob("gold",  0 ether, -1 ether));
     }
     function test_safe() public {
-        // safe means that the cdp is not risky
-        // you can't frob a cdp into unsafe
-        vat.frob("gold", me, me, me, 10 ether, 5 ether);                // safe draw
-        assertTrue(!try_frob("gold", 0 ether, 6 ether));  // unsafe draw
+        // isCdpSafe means that the cdp is not risky
+        // you can't modifyCDP a cdp into unsafe
+        cdpCore.modifyCDP("gold", me, me, me, 10 ether, 5 ether);                // isCdpSafe increaseCDPDebt
+        assertTrue(!try_frob("gold", 0 ether, 6 ether));  // unsafe increaseCDPDebt
     }
     function test_nice() public {
         // nice means that the collateral has increased or the debt has
         // decreased. remaining unsafe is ok as long as you're nice
 
-        vat.frob("gold", me, me, me, 10 ether, 10 ether);
-        vat.file("gold", 'spot', ray(0.5 ether));  // now unsafe
+        cdpCore.modifyCDP("gold", me, me, me, 10 ether, 10 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(0.5 ether));  // now unsafe
 
         // debt can't increase if unsafe
         assertTrue(!try_frob("gold",  0 ether,  1 ether));
         // debt can decrease
         assertTrue( try_frob("gold",  0 ether, -1 ether));
-        // ink can't decrease
+        // collateralBalance can't decrease
         assertTrue(!try_frob("gold", -1 ether,  0 ether));
-        // ink can increase
+        // collateralBalance can increase
         assertTrue( try_frob("gold",  1 ether,  0 ether));
 
         // cdp is still unsafe
-        // ink can't decrease, even if debt decreases more
+        // collateralBalance can't decrease, even if debt decreases more
         assertTrue(!this.try_frob("gold", -2 ether, -4 ether));
-        // debt can't increase, even if ink increases more
+        // debt can't increase, even if collateralBalance increases more
         assertTrue(!this.try_frob("gold",  5 ether,  1 ether));
 
-        // ink can decrease if end state is safe
+        // collateralBalance can decrease if auctionEndTimestamp state is isCdpSafe
         assertTrue( this.try_frob("gold", -1 ether, -4 ether));
-        vat.file("gold", 'spot', ray(0.4 ether));  // now unsafe
-        // debt can increase if end state is safe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(0.4 ether));  // now unsafe
+        // debt can increase if auctionEndTimestamp state is isCdpSafe
         assertTrue( this.try_frob("gold",  5 ether, 1 ether));
     }
 
-    function rad(uint wad) internal pure returns (uint) {
-        return wad * 10 ** 27;
+    function fxp45Int(uint fxp18Int) internal pure returns (uint) {
+        return fxp18Int * 10 ** 27;
     }
     function test_alt_callers() public {
-        Usr ali = new Usr(vat);
-        Usr bob = new Usr(vat);
-        Usr che = new Usr(vat);
+        Usr ali = new Usr(cdpCore);
+        Usr bob = new Usr(cdpCore);
+        Usr che = new Usr(cdpCore);
 
         address a = address(ali);
         address b = address(bob);
         address c = address(che);
 
-        vat.slip("gold", a, int(rad(20 ether)));
-        vat.slip("gold", b, int(rad(20 ether)));
-        vat.slip("gold", c, int(rad(20 ether)));
+        cdpCore.modifyUsersCollateralBalance("gold", a, int(fxp45Int(20 ether)));
+        cdpCore.modifyUsersCollateralBalance("gold", b, int(fxp45Int(20 ether)));
+        cdpCore.modifyUsersCollateralBalance("gold", c, int(fxp45Int(20 ether)));
 
-        ali.frob("gold", a, a, a, 10 ether, 5 ether);
+        ali.modifyCDP("gold", a, a, a, 10 ether, 5 ether);
 
-        // anyone can lock
+        // anyone can transferCollateralToCDP
         assertTrue( ali.can_frob("gold", a, a, a,  1 ether,  0 ether));
         assertTrue( bob.can_frob("gold", a, b, b,  1 ether,  0 ether));
         assertTrue( che.can_frob("gold", a, c, c,  1 ether,  0 ether));
-        // but only with their own gems
+        // but only with their own collateralTokens
         assertTrue(!ali.can_frob("gold", a, b, a,  1 ether,  0 ether));
         assertTrue(!bob.can_frob("gold", a, c, b,  1 ether,  0 ether));
         assertTrue(!che.can_frob("gold", a, a, c,  1 ether,  0 ether));
 
-        // only the lad can free
+        // only the lad can transferCollateralFromCDP
         assertTrue( ali.can_frob("gold", a, a, a, -1 ether,  0 ether));
         assertTrue(!bob.can_frob("gold", a, b, b, -1 ether,  0 ether));
         assertTrue(!che.can_frob("gold", a, c, c, -1 ether,  0 ether));
-        // the lad can free to anywhere
+        // the lad can transferCollateralFromCDP to anywhere
         assertTrue( ali.can_frob("gold", a, b, a, -1 ether,  0 ether));
         assertTrue( ali.can_frob("gold", a, c, a, -1 ether,  0 ether));
 
-        // only the lad can draw
+        // only the lad can increaseCDPDebt
         assertTrue( ali.can_frob("gold", a, a, a,  0 ether,  1 ether));
         assertTrue(!bob.can_frob("gold", a, b, b,  0 ether,  1 ether));
         assertTrue(!che.can_frob("gold", a, c, c,  0 ether,  1 ether));
-        // the lad can draw to anywhere
+        // the lad can increaseCDPDebt to anywhere
         assertTrue( ali.can_frob("gold", a, a, b,  0 ether,  1 ether));
         assertTrue( ali.can_frob("gold", a, a, c,  0 ether,  1 ether));
 
-        vat.mint(address(bob), 1 ether);
-        vat.mint(address(che), 1 ether);
+        cdpCore.mint(address(bob), 1 ether);
+        cdpCore.mint(address(che), 1 ether);
 
-        // anyone can wipe
+        // anyone can decreaseCDPDebt
         assertTrue( ali.can_frob("gold", a, a, a,  0 ether, -1 ether));
         assertTrue( bob.can_frob("gold", a, b, b,  0 ether, -1 ether));
         assertTrue( che.can_frob("gold", a, c, c,  0 ether, -1 ether));
@@ -282,27 +282,27 @@ contract FrobTest is DSTest {
         assertTrue(!che.can_frob("gold", a, c, a,  0 ether, -1 ether));
     }
 
-    function test_hope() public {
-        Usr ali = new Usr(vat);
-        Usr bob = new Usr(vat);
-        Usr che = new Usr(vat);
+    function test_grantAccess() public {
+        Usr ali = new Usr(cdpCore);
+        Usr bob = new Usr(cdpCore);
+        Usr che = new Usr(cdpCore);
 
         address a = address(ali);
         address b = address(bob);
         address c = address(che);
 
-        vat.slip("gold", a, int(rad(20 ether)));
-        vat.slip("gold", b, int(rad(20 ether)));
-        vat.slip("gold", c, int(rad(20 ether)));
+        cdpCore.modifyUsersCollateralBalance("gold", a, int(fxp45Int(20 ether)));
+        cdpCore.modifyUsersCollateralBalance("gold", b, int(fxp45Int(20 ether)));
+        cdpCore.modifyUsersCollateralBalance("gold", c, int(fxp45Int(20 ether)));
 
-        ali.frob("gold", a, a, a, 10 ether, 5 ether);
+        ali.modifyCDP("gold", a, a, a, 10 ether, 5 ether);
 
         // only owner can do risky actions
         assertTrue( ali.can_frob("gold", a, a, a,  0 ether,  1 ether));
         assertTrue(!bob.can_frob("gold", a, b, b,  0 ether,  1 ether));
         assertTrue(!che.can_frob("gold", a, c, c,  0 ether,  1 ether));
 
-        ali.hope(address(bob));
+        ali.grantAccess(address(bob));
 
         // unless they hope another user
         assertTrue( ali.can_frob("gold", a, a, a,  0 ether,  1 ether));
@@ -312,7 +312,7 @@ contract FrobTest is DSTest {
 
     function test_dust() public {
         assertTrue( try_frob("gold", 9 ether,  1 ether));
-        vat.file("gold", "dust", rad(5 ether));
+        cdpCore.changeConfig("gold", "dust", fxp45Int(5 ether));
         assertTrue(!try_frob("gold", 5 ether,  2 ether));
         assertTrue( try_frob("gold", 0 ether,  5 ether));
         assertTrue(!try_frob("gold", 0 ether, -5 ether));
@@ -321,78 +321,78 @@ contract FrobTest is DSTest {
 }
 
 contract JoinTest is DSTest {
-    TestVat vat;
-    DSToken gem;
+    TestVat cdpCore;
+    DSToken collateralToken;
     GemJoin gemA;
     DaiJoin daiA;
     DSToken dai;
     address me;
 
     function setUp() public {
-        vat = new TestVat();
-        vat.init("eth");
+        cdpCore = new TestVat();
+        cdpCore.createNewCollateralType("eth");
 
-        gem  = new DSToken("Gem");
-        gemA = new GemJoin(address(vat), "gem", address(gem));
-        vat.rely(address(gemA));
+        collateralToken  = new DSToken("Gem");
+        gemA = new GemJoin(address(cdpCore), "collateralToken", address(collateralToken));
+        cdpCore.authorizeAddress(address(gemA));
 
         dai  = new DSToken("Dai");
-        daiA = new DaiJoin(address(vat), address(dai));
-        vat.rely(address(daiA));
+        daiA = new DaiJoin(address(cdpCore), address(dai));
+        cdpCore.authorizeAddress(address(daiA));
         dai.setOwner(address(daiA));
 
         me = address(this);
     }
     function try_cage(address a) public payable returns (bool ok) {
-        string memory sig = "cage()";
+        string memory sig = "disable()";
         (ok,) = a.call(abi.encodeWithSignature(sig));
     }
-    function try_join_gem(address usr, uint wad) public returns (bool ok) {
-        string memory sig = "join(address,uint256)";
-        (ok,) = address(gemA).call(abi.encodeWithSignature(sig, usr, wad));
+    function try_join_gem(address usr, uint fxp18Int) public returns (bool ok) {
+        string memory sig = "deposit(address,uint256)";
+        (ok,) = address(gemA).call(abi.encodeWithSignature(sig, usr, fxp18Int));
     }
-    function try_exit_dai(address usr, uint wad) public returns (bool ok) {
+    function try_exit_dai(address usr, uint fxp18Int) public returns (bool ok) {
         string memory sig = "exit(address,uint256)";
-        (ok,) = address(daiA).call(abi.encodeWithSignature(sig, usr, wad));
+        (ok,) = address(daiA).call(abi.encodeWithSignature(sig, usr, fxp18Int));
     }
     function test_gem_join() public {
-        gem.mint(20 ether);
-        gem.approve(address(gemA), 20 ether);
+        collateralToken.mint(20 ether);
+        collateralToken.approve(address(gemA), 20 ether);
         assertTrue( try_join_gem(address(this), 10 ether));
-        assertEq(vat.gem("gem", me), 10 ether);
+        assertEq(cdpCore.collateralToken("collateralToken", me), 10 ether);
         assertTrue( try_cage(address(gemA)));
         assertTrue(!try_join_gem(address(this), 10 ether));
-        assertEq(vat.gem("gem", me), 10 ether);
+        assertEq(cdpCore.collateralToken("collateralToken", me), 10 ether);
     }
-    function rad(uint wad) internal pure returns (uint) {
-        return wad * 10 ** 27;
+    function fxp45Int(uint fxp18Int) internal pure returns (uint) {
+        return fxp18Int * 10 ** 27;
     }
     function test_dai_exit() public {
-        address urn = address(this);
-        vat.mint(address(this), 100 ether);
-        vat.hope(address(daiA));
-        assertTrue( try_exit_dai(urn, 40 ether));
+        address cdp = address(this);
+        cdpCore.mint(address(this), 100 ether);
+        cdpCore.grantAccess(address(daiA));
+        assertTrue( try_exit_dai(cdp, 40 ether));
         assertEq(dai.balanceOf(address(this)), 40 ether);
-        assertEq(vat.dai(me),              rad(60 ether));
+        assertEq(cdpCore.dai(me),              fxp45Int(60 ether));
         assertTrue( try_cage(address(daiA)));
-        assertTrue(!try_exit_dai(urn, 40 ether));
+        assertTrue(!try_exit_dai(cdp, 40 ether));
         assertEq(dai.balanceOf(address(this)), 40 ether);
-        assertEq(vat.dai(me),              rad(60 ether));
+        assertEq(cdpCore.dai(me),              fxp45Int(60 ether));
     }
     function test_dai_exit_join() public {
-        address urn = address(this);
-        vat.mint(address(this), 100 ether);
-        vat.hope(address(daiA));
-        daiA.exit(urn, 60 ether);
+        address cdp = address(this);
+        cdpCore.mint(address(this), 100 ether);
+        cdpCore.grantAccess(address(daiA));
+        daiA.exit(cdp, 60 ether);
         dai.approve(address(daiA), uint(-1));
-        daiA.join(urn, 30 ether);
+        daiA.deposit(cdp, 30 ether);
         assertEq(dai.balanceOf(address(this)),     30 ether);
-        assertEq(vat.dai(me),                  rad(70 ether));
+        assertEq(cdpCore.dai(me),                  fxp45Int(70 ether));
     }
     function test_cage_no_access() public {
-        gemA.deny(address(this));
+        gemA.deauthorizeAddress(address(this));
         assertTrue(!try_cage(address(gemA)));
-        daiA.deny(address(this));
+        daiA.deauthorizeAddress(address(this));
         assertTrue(!try_cage(address(daiA)));
     }
 }
@@ -401,21 +401,21 @@ interface FlipLike {
     struct Bid {
         uint256 bid;
         uint256 lot;
-        address guy;  // high bidder
-        uint48  tic;  // expiry time
-        uint48  end;
-        address urn;
-        address gal;
+        address highBidder;  // high bidder
+        uint48  bidExpiry;  // expiry time
+        uint48  auctionEndTimestamp;
+        address cdp;
+        address incomeRecipient;
         uint256 tab;
     }
     function bids(uint) external view returns (
         uint256 bid,
         uint256 lot,
-        address guy,
-        uint48  tic,
-        uint48  end,
+        address highBidder,
+        uint48  bidExpiry,
+        uint48  auctionEndTimestamp,
         address usr,
-        address gal,
+        address incomeRecipient,
         uint256 tab
     );
 }
@@ -423,17 +423,17 @@ interface FlipLike {
 contract BiteTest is DSTest {
     Hevm hevm;
 
-    TestVat vat;
-    TestVow vow;
-    Cat     cat;
+    TestVat cdpCore;
+    TestVow settlement;
+    Liquidation     cat;
     DSToken gold;
-    Jug     jug;
+    Jug     stabilityFeeDatabase;
 
     GemJoin gemA;
 
-    Flipper flip;
-    Flopper flop;
-    Flapper flap;
+    Flipper collateralForDaiAuction;
+    BadDebtAuction flop;
+    SurplusAuction flap;
 
     DSToken gov;
 
@@ -444,28 +444,28 @@ contract BiteTest is DSTest {
     uint256 constant RAY = 10 ** 27;
     uint256 constant RAD = 10 ** 45;
 
-    function try_frob(bytes32 ilk, int ink, int art) public returns (bool ok) {
-        string memory sig = "frob(bytes32,address,address,address,int256,int256)";
+    function try_frob(bytes32 collateralType, int collateralBalance, int stablecoinDebt) public returns (bool ok) {
+        string memory sig = "modifyCDP(bytes32,address,address,address,int256,int256)";
         address self = address(this);
-        (ok,) = address(vat).call(abi.encodeWithSignature(sig, ilk, self, self, self, ink, art));
+        (ok,) = address(cdpCore).call(abi.encodeWithSignature(sig, collateralType, self, self, self, collateralBalance, stablecoinDebt));
     }
 
-    function ray(uint wad) internal pure returns (uint) {
-        return wad * 10 ** 9;
+    function fxp27Int(uint fxp18Int) internal pure returns (uint) {
+        return fxp18Int * 10 ** 9;
     }
-    function rad(uint wad) internal pure returns (uint) {
-        return wad * 10 ** 27;
+    function fxp45Int(uint fxp18Int) internal pure returns (uint) {
+        return fxp18Int * 10 ** 27;
     }
 
-    function gem(bytes32 ilk, address urn) internal view returns (uint) {
-        return vat.gem(ilk, urn);
+    function collateralToken(bytes32 collateralType, address cdp) internal view returns (uint) {
+        return cdpCore.collateralToken(collateralType, cdp);
     }
-    function ink(bytes32 ilk, address urn) internal view returns (uint) {
-        (uint ink_, uint art_) = vat.urns(ilk, urn); art_;
+    function collateralBalance(bytes32 collateralType, address cdp) internal view returns (uint) {
+        (uint ink_, uint art_) = cdpCore.cdps(collateralType, cdp); art_;
         return ink_;
     }
-    function art(bytes32 ilk, address urn) internal view returns (uint) {
-        (uint ink_, uint art_) = vat.urns(ilk, urn); ink_;
+    function stablecoinDebt(bytes32 collateralType, address cdp) internal view returns (uint) {
+        (uint ink_, uint art_) = cdpCore.cdps(collateralType, cdp); ink_;
         return art_;
     }
 
@@ -476,659 +476,659 @@ contract BiteTest is DSTest {
         gov = new DSToken('GOV');
         gov.mint(100 ether);
 
-        vat = new TestVat();
-        vat = vat;
+        cdpCore = new TestVat();
+        cdpCore = cdpCore;
 
-        flap = new Flapper(address(vat), address(gov));
-        flop = new Flopper(address(vat), address(gov));
+        flap = new SurplusAuction(address(cdpCore), address(gov));
+        flop = new BadDebtAuction(address(cdpCore), address(gov));
 
-        vow = new TestVow(address(vat), address(flap), address(flop));
-        flap.rely(address(vow));
-        flop.rely(address(vow));
+        settlement = new TestVow(address(cdpCore), address(flap), address(flop));
+        flap.authorizeAddress(address(settlement));
+        flop.authorizeAddress(address(settlement));
 
-        jug = new Jug(address(vat));
-        jug.init("gold");
-        jug.file("vow", address(vow));
-        vat.rely(address(jug));
+        stabilityFeeDatabase = new Jug(address(cdpCore));
+        stabilityFeeDatabase.createNewCollateralType("gold");
+        stabilityFeeDatabase.changeConfig("settlement", address(settlement));
+        cdpCore.authorizeAddress(address(stabilityFeeDatabase));
 
-        cat = new Cat(address(vat));
-        cat.file("vow", address(vow));
-        cat.file("box", rad((10 ether) * MLN));
-        vat.rely(address(cat));
-        vow.rely(address(cat));
+        cat = new Liquidation(address(cdpCore));
+        cat.changeConfig("settlement", address(settlement));
+        cat.changeConfig("box", fxp45Int((10 ether) * MLN));
+        cdpCore.authorizeAddress(address(cat));
+        settlement.authorizeAddress(address(cat));
 
         gold = new DSToken("GEM");
         gold.mint(1000 ether);
 
-        vat.init("gold");
-        gemA = new GemJoin(address(vat), "gold", address(gold));
-        vat.rely(address(gemA));
+        cdpCore.createNewCollateralType("gold");
+        gemA = new GemJoin(address(cdpCore), "gold", address(gold));
+        cdpCore.authorizeAddress(address(gemA));
         gold.approve(address(gemA));
-        gemA.join(address(this), 1000 ether);
+        gemA.deposit(address(this), 1000 ether);
 
-        vat.file("gold", "spot", ray(1 ether));
-        vat.file("gold", "line", rad(1000 ether));
-        vat.file("Line",         rad(1000 ether));
-        flip = new Flipper(address(vat), address(cat), "gold");
-        flip.rely(address(cat));
-        cat.rely(address(flip));
-        cat.file("gold", "flip", address(flip));
-        cat.file("gold", "chop", 1 ether);
+        cdpCore.changeConfig("gold", "maxDaiPerUnitOfCollateral", fxp27Int(1 ether));
+        cdpCore.changeConfig("gold", "debtCeiling", fxp45Int(1000 ether));
+        cdpCore.changeConfig("totalDebtCeiling",         fxp45Int(1000 ether));
+        collateralForDaiAuction = new Flipper(address(cdpCore), address(cat), "gold");
+        collateralForDaiAuction.authorizeAddress(address(cat));
+        cat.authorizeAddress(address(collateralForDaiAuction));
+        cat.changeConfig("gold", "collateralForDaiAuction", address(collateralForDaiAuction));
+        cat.changeConfig("gold", "liquidationPenalty", 1 ether);
 
-        vat.rely(address(flip));
-        vat.rely(address(flap));
-        vat.rely(address(flop));
+        cdpCore.authorizeAddress(address(collateralForDaiAuction));
+        cdpCore.authorizeAddress(address(flap));
+        cdpCore.authorizeAddress(address(flop));
 
-        vat.hope(address(flip));
-        vat.hope(address(flop));
-        gold.approve(address(vat));
+        cdpCore.grantAccess(address(collateralForDaiAuction));
+        cdpCore.grantAccess(address(flop));
+        gold.approve(address(cdpCore));
         gov.approve(address(flap));
 
         me = address(this);
     }
 
     function test_set_dunk_multiple_ilks() public {
-        cat.file("gold",   "dunk", rad(111111 ether));
-        (,, uint256 goldDunk) = cat.ilks("gold");
-        assertEq(goldDunk, rad(111111 ether));
-        cat.file("silver", "dunk", rad(222222 ether));
-        (,, uint256 silverDunk) = cat.ilks("silver");
-        assertEq(silverDunk, rad(222222 ether));
+        cat.changeConfig("gold",   "dunk", fxp45Int(111111 ether));
+        (,, uint256 goldDunk) = cat.collateralTypes("gold");
+        assertEq(goldDunk, fxp45Int(111111 ether));
+        cat.changeConfig("silver", "dunk", fxp45Int(222222 ether));
+        (,, uint256 silverDunk) = cat.collateralTypes("silver");
+        assertEq(silverDunk, fxp45Int(222222 ether));
     }
     function test_cat_set_box() public {
-        assertEq(cat.box(), rad((10 ether) * MLN));
-        cat.file("box", rad((20 ether) * MLN));
-        assertEq(cat.box(), rad((20 ether) * MLN));
+        assertEq(cat.box(), fxp45Int((10 ether) * MLN));
+        cat.changeConfig("box", fxp45Int((20 ether) * MLN));
+        assertEq(cat.box(), fxp45Int((20 ether) * MLN));
     }
     function test_bite_under_dunk() public {
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 40 ether, 100 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 40 ether, 100 ether);
         // tag=4, mat=2
-        vat.file("gold", 'spot', ray(2 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2 ether));  // now unsafe
 
-        cat.file("gold", "dunk", rad(111 ether));
-        cat.file("gold", "chop", 1.1 ether);
+        cat.changeConfig("gold", "dunk", fxp45Int(111 ether));
+        cat.changeConfig("gold", "liquidationPenalty", 1.1 ether);
 
-        uint auction = cat.bite("gold", address(this));
+        uint auction = cat.liquidateCdp("gold", address(this));
         // the full CDP is liquidated
-        assertEq(ink("gold", address(this)), 0);
-        assertEq(art("gold", address(this)), 0);
-        // all debt goes to the vow
-        assertEq(vow.Awe(), rad(100 ether));
+        assertEq(collateralBalance("gold", address(this)), 0);
+        assertEq(stablecoinDebt("gold", address(this)), 0);
+        // all debt goes to the settlement
+        assertEq(settlement.totalDebt(), fxp45Int(100 ether));
         // auction is for all collateral
-        (, uint lot,,,,,, uint tab) = flip.bids(auction);
+        (, uint lot,,,,,, uint tab) = collateralForDaiAuction.bids(auction);
         assertEq(lot,        40 ether);
-        assertEq(tab,   rad(110 ether));
+        assertEq(tab,   fxp45Int(110 ether));
     }
     function test_bite_over_dunk() public {
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 40 ether, 100 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 40 ether, 100 ether);
         // tag=4, mat=2
-        vat.file("gold", 'spot', ray(2 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2 ether));  // now unsafe
 
-        cat.file("gold", "chop", 1.1 ether);
-        cat.file("gold", "dunk", rad(82.5 ether));
+        cat.changeConfig("gold", "liquidationPenalty", 1.1 ether);
+        cat.changeConfig("gold", "dunk", fxp45Int(82.5 ether));
 
-        uint auction = cat.bite("gold", address(this));
+        uint auction = cat.liquidateCdp("gold", address(this));
         // the CDP is partially liquidated
-        assertEq(ink("gold", address(this)), 10 ether);
-        assertEq(art("gold", address(this)), 25 ether);
-        // a fraction of the debt goes to the vow
-        assertEq(vow.Awe(), rad(75 ether));
+        assertEq(collateralBalance("gold", address(this)), 10 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 25 ether);
+        // a fraction of the debt goes to the settlement
+        assertEq(settlement.totalDebt(), fxp45Int(75 ether));
         // auction is for a fraction of the collateral
-        (, uint lot,,,,,, uint tab) = FlipLike(address(flip)).bids(auction);
+        (, uint lot,,,,,, uint tab) = FlipLike(address(collateralForDaiAuction)).bids(auction);
         assertEq(lot,       30 ether);
-        assertEq(tab,   rad(82.5 ether));
+        assertEq(tab,   fxp45Int(82.5 ether));
     }
 
     function test_happy_bite() public {
-        // spot = tag / (par . mat)
+        // maxDaiPerUnitOfCollateral = tag / (par . mat)
         // tag=5, mat=2
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 40 ether, 100 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 40 ether, 100 ether);
 
         // tag=4, mat=2
-        vat.file("gold", 'spot', ray(2 ether));  // now unsafe
-        cat.file("gold", "chop", 1.1 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2 ether));  // now unsafe
+        cat.changeConfig("gold", "liquidationPenalty", 1.1 ether);
 
-        assertEq(ink("gold", address(this)),  40 ether);
-        assertEq(art("gold", address(this)), 100 ether);
-        assertEq(vow.Woe(), 0 ether);
-        assertEq(gem("gold", address(this)), 960 ether);
+        assertEq(collateralBalance("gold", address(this)),  40 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 100 ether);
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(), 0 ether);
+        assertEq(collateralToken("gold", address(this)), 960 ether);
 
-        cat.file("gold", "dunk", rad(200 ether));  // => bite everything
+        cat.changeConfig("gold", "dunk", fxp45Int(200 ether));  // => liquidateCdp everything
         assertEq(cat.litter(), 0);
-        uint auction = cat.bite("gold", address(this));
-        assertEq(cat.litter(), rad(110 ether));
-        assertEq(ink("gold", address(this)), 0);
-        assertEq(art("gold", address(this)), 0);
-        assertEq(vow.sin(now),   rad(100 ether));
-        assertEq(gem("gold", address(this)), 960 ether);
+        uint auction = cat.liquidateCdp("gold", address(this));
+        assertEq(cat.litter(), fxp45Int(110 ether));
+        assertEq(collateralBalance("gold", address(this)), 0);
+        assertEq(stablecoinDebt("gold", address(this)), 0);
+        assertEq(settlement.badDebt(now),   fxp45Int(100 ether));
+        assertEq(collateralToken("gold", address(this)), 960 ether);
 
-        assertEq(vat.dai(address(vow)), rad(0 ether));
-        vat.mint(address(this), 100 ether);  // magic up some dai for bidding
-        flip.tend(auction, 40 ether,   rad(1 ether));
-        flip.tend(auction, 40 ether, rad(110 ether));
+        assertEq(cdpCore.dai(address(settlement)), fxp45Int(0 ether));
+        cdpCore.mint(address(this), 100 ether);  // magic up some dai for bidding
+        collateralForDaiAuction.makeBidIncreaseBidSize(auction, 40 ether,   fxp45Int(1 ether));
+        collateralForDaiAuction.makeBidIncreaseBidSize(auction, 40 ether, fxp45Int(110 ether));
 
-        assertEq(vat.dai(address(this)),  rad(90 ether));
-        assertEq(gem("gold", address(this)), 960 ether);
-        flip.dent(auction, 38 ether,  rad(110 ether));
-        assertEq(vat.dai(address(this)),  rad(90 ether));
-        assertEq(gem("gold", address(this)), 962 ether);
-        assertEq(vow.sin(now),     rad(100 ether));
+        assertEq(cdpCore.dai(address(this)),  fxp45Int(90 ether));
+        assertEq(collateralToken("gold", address(this)), 960 ether);
+        collateralForDaiAuction.makeBidDecreaseLotSize(auction, 38 ether,  fxp45Int(110 ether));
+        assertEq(cdpCore.dai(address(this)),  fxp45Int(90 ether));
+        assertEq(collateralToken("gold", address(this)), 962 ether);
+        assertEq(settlement.badDebt(now),     fxp45Int(100 ether));
 
         hevm.warp(now + 4 hours);
-        assertEq(cat.litter(), rad(110 ether));
-        flip.deal(auction);
+        assertEq(cat.litter(), fxp45Int(110 ether));
+        collateralForDaiAuction.claimWinningBid(auction);
         assertEq(cat.litter(), 0);
-        assertEq(vat.dai(address(vow)),  rad(110 ether));
+        assertEq(cdpCore.dai(address(settlement)),  fxp45Int(110 ether));
     }
 
     // tests a partial lot liquidation because it would fill the literbox
     function test_partial_litterbox() public {
-        // spot = tag / (par . mat)
+        // maxDaiPerUnitOfCollateral = tag / (par . mat)
         // tag=5, mat=2
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 100 ether, 150 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 100 ether, 150 ether);
 
         // tag=4, mat=2
-        vat.file("gold", 'spot', ray(1 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(1 ether));  // now unsafe
 
-        assertEq(ink("gold", address(this)), 100 ether);
-        assertEq(art("gold", address(this)), 150 ether);
-        assertEq(vow.Woe(), 0 ether);
-        assertEq(gem("gold", address(this)), 900 ether);
+        assertEq(collateralBalance("gold", address(this)), 100 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 150 ether);
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(), 0 ether);
+        assertEq(collateralToken("gold", address(this)), 900 ether);
 
-        cat.file("box", rad(75 ether));
-        cat.file("gold", "dunk", rad(100 ether));
-        assertEq(cat.box(), rad(75 ether));
+        cat.changeConfig("box", fxp45Int(75 ether));
+        cat.changeConfig("gold", "dunk", fxp45Int(100 ether));
+        assertEq(cat.box(), fxp45Int(75 ether));
         assertEq(cat.litter(), 0);
-        uint auction = cat.bite("gold", address(this));
+        uint auction = cat.liquidateCdp("gold", address(this));
 
-        assertEq(ink("gold", address(this)), 50 ether);
-        assertEq(art("gold", address(this)), 75 ether);
-        assertEq(vow.sin(now), rad(75 ether));
-        assertEq(gem("gold", address(this)), 900 ether);
+        assertEq(collateralBalance("gold", address(this)), 50 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 75 ether);
+        assertEq(settlement.badDebt(now), fxp45Int(75 ether));
+        assertEq(collateralToken("gold", address(this)), 900 ether);
 
-        assertEq(vat.dai(address(this)),  rad(150 ether));
-        assertEq(vat.dai(address(vow)),     rad(0 ether));
-        flip.tend(auction, 50 ether, rad(1 ether));
-        assertEq(cat.litter(), rad(75 ether));
-        assertEq(vat.dai(address(this)), rad(149 ether));
-        flip.tend(auction, 50 ether, rad(75 ether));
-        assertEq(vat.dai(address(this)), rad(75 ether));
+        assertEq(cdpCore.dai(address(this)),  fxp45Int(150 ether));
+        assertEq(cdpCore.dai(address(settlement)),     fxp45Int(0 ether));
+        collateralForDaiAuction.makeBidIncreaseBidSize(auction, 50 ether, fxp45Int(1 ether));
+        assertEq(cat.litter(), fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(this)), fxp45Int(149 ether));
+        collateralForDaiAuction.makeBidIncreaseBidSize(auction, 50 ether, fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(this)), fxp45Int(75 ether));
 
-        assertEq(gem("gold", address(this)),  900 ether);
-        flip.dent(auction, 25 ether, rad(75 ether));
-        assertEq(cat.litter(), rad(75 ether));
-        assertEq(vat.dai(address(this)), rad(75 ether));
-        assertEq(gem("gold", address(this)), 925 ether);
-        assertEq(vow.sin(now), rad(75 ether));
+        assertEq(collateralToken("gold", address(this)),  900 ether);
+        collateralForDaiAuction.makeBidDecreaseLotSize(auction, 25 ether, fxp45Int(75 ether));
+        assertEq(cat.litter(), fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(this)), fxp45Int(75 ether));
+        assertEq(collateralToken("gold", address(this)), 925 ether);
+        assertEq(settlement.badDebt(now), fxp45Int(75 ether));
 
         hevm.warp(now + 4 hours);
-        flip.deal(auction);
+        collateralForDaiAuction.claimWinningBid(auction);
         assertEq(cat.litter(), 0);
-        assertEq(gem("gold", address(this)),  950 ether);
-        assertEq(vat.dai(address(this)),   rad(75 ether));
-        assertEq(vat.dai(address(vow)),    rad(75 ether));
+        assertEq(collateralToken("gold", address(this)),  950 ether);
+        assertEq(cdpCore.dai(address(this)),   fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(settlement)),    fxp45Int(75 ether));
     }
 
     // tests a partial lot liquidation because it would fill the literbox
     function test_partial_litterbox_realistic_values() public {
-        // spot = tag / (par . mat)
+        // maxDaiPerUnitOfCollateral = tag / (par . mat)
         // tag=5, mat=2
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 100 ether, 150 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 100 ether, 150 ether);
 
         // tag=4, mat=2
-        vat.file("gold", 'spot', ray(1 ether));  // now unsafe
-        cat.file("gold", "chop", 1.13 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(1 ether));  // now unsafe
+        cat.changeConfig("gold", "liquidationPenalty", 1.13 ether);
 
-        assertEq(ink("gold", address(this)), 100 ether);
-        assertEq(art("gold", address(this)), 150 ether);
-        assertEq(vow.Woe(), 0 ether);
-        assertEq(gem("gold", address(this)), 900 ether);
+        assertEq(collateralBalance("gold", address(this)), 100 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 150 ether);
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(), 0 ether);
+        assertEq(collateralToken("gold", address(this)), 900 ether);
 
-        // To check this yourself, use the following rate calculation (example 8%):
+        // To check this yourself, use the following debtMultiplierIncludingStabilityFee calculation (example 8%):
         //
         // $ bc -l <<< 'scale=27; e( l(1.08)/(60 * 60 * 24 * 365) )'
         uint256 EIGHT_PCT = 1000000002440418608258400030;
-        jug.file("gold", "duty", EIGHT_PCT);
+        stabilityFeeDatabase.changeConfig("gold", "duty", EIGHT_PCT);
         hevm.warp(now + 10 days);
-        jug.drip("gold");
-        (, uint rate,,,) = vat.ilks("gold");
+        stabilityFeeDatabase.increaseStabilityFee("gold");
+        (, uint debtMultiplierIncludingStabilityFee,,,) = cdpCore.collateralTypes("gold");
 
-        uint vowBalance = vat.dai(address(vow)); // Balance updates after vat.fold is called from jug
+        uint vowBalance = cdpCore.dai(address(settlement)); // Balance updates after cdpCore.changeDebtMultiplier is called from stabilityFeeDatabase
 
-        cat.file("box", rad(75 ether));
-        cat.file("gold", "dunk", rad(100 ether));
-        assertEq(cat.box(), rad(75 ether));
+        cat.changeConfig("box", fxp45Int(75 ether));
+        cat.changeConfig("gold", "dunk", fxp45Int(100 ether));
+        assertEq(cat.box(), fxp45Int(75 ether));
         assertEq(cat.litter(), 0);
-        uint auction = cat.bite("gold", address(this));
-        (,,,,,,,uint tab) = flip.bids(auction);
+        uint auction = cat.liquidateCdp("gold", address(this));
+        (,,,,,,,uint tab) = collateralForDaiAuction.bids(auction);
 
-        assertTrue(cat.box() - cat.litter() < ray(1 ether)); // Rounding error to fill box
+        assertTrue(cat.box() - cat.litter() < fxp27Int(1 ether)); // Rounding error to fill box
         assertEq(cat.litter(), tab);                         // tab = 74.9999... RAD
 
-        uint256 dart = rad(75 ether) * WAD / rate / 1.13 ether; // room / rate / chop
-        uint256 dink = 100 ether * dart / 150 ether;
+        uint256 changeInDebt = fxp45Int(75 ether) * WAD / debtMultiplierIncludingStabilityFee / 1.13 ether; // room / debtMultiplierIncludingStabilityFee / liquidationPenalty
+        uint256 changeInCollateral = 100 ether * changeInDebt / 150 ether;
 
-        assertEq(ink("gold", address(this)), 100 ether - dink); // Taken in vat.grab
-        assertEq(art("gold", address(this)), 150 ether - dart); // Taken in vat.grab
-        assertEq(vow.sin(now), dart * rate);               
-        assertEq(gem("gold", address(this)), 900 ether);
+        assertEq(collateralBalance("gold", address(this)), 100 ether - changeInCollateral); // Taken in cdpCore.liquidateCDP
+        assertEq(stablecoinDebt("gold", address(this)), 150 ether - changeInDebt); // Taken in cdpCore.liquidateCDP
+        assertEq(settlement.badDebt(now), changeInDebt * debtMultiplierIncludingStabilityFee);               
+        assertEq(collateralToken("gold", address(this)), 900 ether);
 
-        assertEq(vat.dai(address(this)), rad(150 ether));
-        assertEq(vat.dai(address(vow)),  vowBalance);
-        flip.tend(auction, dink, rad( 1 ether));
+        assertEq(cdpCore.dai(address(this)), fxp45Int(150 ether));
+        assertEq(cdpCore.dai(address(settlement)),  vowBalance);
+        collateralForDaiAuction.makeBidIncreaseBidSize(auction, changeInCollateral, fxp45Int( 1 ether));
         assertEq(cat.litter(), tab);
-        assertEq(vat.dai(address(this)), rad(149 ether));
-        flip.tend(auction, dink, tab);
-        assertEq(vat.dai(address(this)), rad(150 ether) - tab);
+        assertEq(cdpCore.dai(address(this)), fxp45Int(149 ether));
+        collateralForDaiAuction.makeBidIncreaseBidSize(auction, changeInCollateral, tab);
+        assertEq(cdpCore.dai(address(this)), fxp45Int(150 ether) - tab);
 
-        assertEq(gem("gold", address(this)),  900 ether);
-        flip.dent(auction, 25 ether, tab);
+        assertEq(collateralToken("gold", address(this)),  900 ether);
+        collateralForDaiAuction.makeBidDecreaseLotSize(auction, 25 ether, tab);
         assertEq(cat.litter(), tab);
-        assertEq(vat.dai(address(this)), rad(150 ether) - tab);
-        assertEq(gem("gold", address(this)), 900 ether + (dink - 25 ether));
-        assertEq(vow.sin(now), dart * rate);
+        assertEq(cdpCore.dai(address(this)), fxp45Int(150 ether) - tab);
+        assertEq(collateralToken("gold", address(this)), 900 ether + (changeInCollateral - 25 ether));
+        assertEq(settlement.badDebt(now), changeInDebt * debtMultiplierIncludingStabilityFee);
 
         hevm.warp(now + 4 hours);
-        flip.deal(auction);
+        collateralForDaiAuction.claimWinningBid(auction);
         assertEq(cat.litter(), 0);
-        assertEq(gem("gold", address(this)),  900 ether + dink); // (flux another 25 wad into gem)
-        assertEq(vat.dai(address(this)), rad(150 ether) - tab);  
-        assertEq(vat.dai(address(vow)),  vowBalance + tab);
+        assertEq(collateralToken("gold", address(this)),  900 ether + changeInCollateral); // (transferCollateral another 25 fxp18Int into collateralToken)
+        assertEq(cdpCore.dai(address(this)), fxp45Int(150 ether) - tab);  
+        assertEq(cdpCore.dai(address(settlement)),  vowBalance + tab);
     }
 
     // tests a partial lot liquidation that fill litterbox
     function testFail_fill_litterbox() public {
-        // spot = tag / (par . mat)
+        // maxDaiPerUnitOfCollateral = tag / (par . mat)
         // tag=5, mat=2
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 100 ether, 150 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 100 ether, 150 ether);
 
         // tag=4, mat=2
-        vat.file("gold", 'spot', ray(1 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(1 ether));  // now unsafe
 
-        assertEq(ink("gold", address(this)), 100 ether);
-        assertEq(art("gold", address(this)), 150 ether);
-        assertEq(vow.Woe(), 0 ether);
-        assertEq(gem("gold", address(this)), 900 ether);
+        assertEq(collateralBalance("gold", address(this)), 100 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 150 ether);
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(), 0 ether);
+        assertEq(collateralToken("gold", address(this)), 900 ether);
 
-        cat.file("box", rad(75 ether));
-        cat.file("gold", "dunk", rad(100 ether));
-        assertEq(cat.box(), rad(75 ether));
+        cat.changeConfig("box", fxp45Int(75 ether));
+        cat.changeConfig("gold", "dunk", fxp45Int(100 ether));
+        assertEq(cat.box(), fxp45Int(75 ether));
         assertEq(cat.litter(), 0);
-        cat.bite("gold", address(this));
-        assertEq(cat.litter(), rad(75 ether));
-        assertEq(ink("gold", address(this)), 50 ether);
-        assertEq(art("gold", address(this)), 75 ether);
-        assertEq(vow.sin(now), rad(75 ether));
-        assertEq(gem("gold", address(this)), 900 ether);
+        cat.liquidateCdp("gold", address(this));
+        assertEq(cat.litter(), fxp45Int(75 ether));
+        assertEq(collateralBalance("gold", address(this)), 50 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 75 ether);
+        assertEq(settlement.badDebt(now), fxp45Int(75 ether));
+        assertEq(collateralToken("gold", address(this)), 900 ether);
 
-        // this bite puts us over the litterbox
-        cat.bite("gold", address(this));
+        // this liquidateCdp puts us over the litterbox
+        cat.liquidateCdp("gold", address(this));
     }
 
-    // Tests for multiple bites where second bite has a dusty amount for room
+    // Tests for multiple bites where second liquidateCdp has a dusty amount for room
     function testFail_dusty_litterbox() public {
-        // spot = tag / (par . mat)
+        // maxDaiPerUnitOfCollateral = tag / (par . mat)
         // tag=5, mat=2
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 50 ether, 80 ether + 1);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 50 ether, 80 ether + 1);
 
         // tag=4, mat=2
-        vat.file("gold", 'spot', ray(1 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(1 ether));  // now unsafe
 
-        assertEq(ink("gold", address(this)), 50 ether);
-        assertEq(art("gold", address(this)), 80 ether + 1);
-        assertEq(vow.Woe(), 0 ether);
-        assertEq(gem("gold", address(this)), 950 ether);
+        assertEq(collateralBalance("gold", address(this)), 50 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 80 ether + 1);
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(), 0 ether);
+        assertEq(collateralToken("gold", address(this)), 950 ether);
 
-        cat.file("box",  rad(100 ether));
-        vat.file("gold", "dust", rad(20 ether));
-        cat.file("gold", "dunk", rad(100 ether));
+        cat.changeConfig("box",  fxp45Int(100 ether));
+        cdpCore.changeConfig("gold", "dust", fxp45Int(20 ether));
+        cat.changeConfig("gold", "dunk", fxp45Int(100 ether));
 
-        assertEq(cat.box(), rad(100 ether));
+        assertEq(cat.box(), fxp45Int(100 ether));
         assertEq(cat.litter(), 0);
-        cat.bite("gold", address(this));
-        assertEq(cat.litter(), rad(80 ether + 1)); // room is now dusty
-        assertEq(ink("gold", address(this)), 0 ether);
-        assertEq(art("gold", address(this)), 0 ether);
-        assertEq(vow.sin(now), rad(80 ether + 1));
-        assertEq(gem("gold", address(this)), 950 ether);
+        cat.liquidateCdp("gold", address(this));
+        assertEq(cat.litter(), fxp45Int(80 ether + 1)); // room is now dusty
+        assertEq(collateralBalance("gold", address(this)), 0 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 0 ether);
+        assertEq(settlement.badDebt(now), fxp45Int(80 ether + 1));
+        assertEq(collateralToken("gold", address(this)), 950 ether);
 
-        // spot = tag / (par . mat)
+        // maxDaiPerUnitOfCollateral = tag / (par . mat)
         // tag=5, mat=2
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 100 ether, 150 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 100 ether, 150 ether);
 
         // tag=4, mat=2
-        vat.file("gold", 'spot', ray(1 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(1 ether));  // now unsafe
 
-        assertEq(ink("gold", address(this)), 100 ether);
-        assertEq(art("gold", address(this)), 150 ether);
-        assertEq(vow.Woe(), 0 ether);
-        assertEq(gem("gold", address(this)), 850 ether);
+        assertEq(collateralBalance("gold", address(this)), 100 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 150 ether);
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(), 0 ether);
+        assertEq(collateralToken("gold", address(this)), 850 ether);
 
-        assertTrue(cat.box() - cat.litter() < rad(20 ether)); // room < dust
+        assertTrue(cat.box() - cat.litter() < fxp45Int(20 ether)); // room < dust
 
-        // // this bite puts us over the litterbox
-        cat.bite("gold", address(this));
+        // // this liquidateCdp puts us over the litterbox
+        cat.liquidateCdp("gold", address(this));
     }
 
-    // test liquidations that fill the litterbox deal them then liquidate more
+    // test liquidations that fill the litterbox claimWinningBid them then liquidate more
     function test_partial_litterbox_multiple_bites() public {
-        // spot = tag / (par . mat)
+        // maxDaiPerUnitOfCollateral = tag / (par . mat)
         // tag=5, mat=2
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 100 ether, 150 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 100 ether, 150 ether);
 
         // tag=4, mat=2
-        vat.file("gold", 'spot', ray(1 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(1 ether));  // now unsafe
 
-        assertEq(ink("gold", address(this)), 100 ether);
-        assertEq(art("gold", address(this)), 150 ether);
-        assertEq(vow.Woe(), 0 ether);
-        assertEq(gem("gold", address(this)), 900 ether);
+        assertEq(collateralBalance("gold", address(this)), 100 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 150 ether);
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(), 0 ether);
+        assertEq(collateralToken("gold", address(this)), 900 ether);
 
-        cat.file("box", rad(75 ether));
-        cat.file("gold", "dunk", rad(100 ether));
-        assertEq(cat.box(), rad(75 ether));
+        cat.changeConfig("box", fxp45Int(75 ether));
+        cat.changeConfig("gold", "dunk", fxp45Int(100 ether));
+        assertEq(cat.box(), fxp45Int(75 ether));
         assertEq(cat.litter(), 0);
-        uint auction = cat.bite("gold", address(this));
-        assertEq(cat.litter(), rad(75 ether));
-        assertEq(ink("gold", address(this)), 50 ether);
-        assertEq(art("gold", address(this)), 75 ether);
-        assertEq(vow.sin(now), rad(75 ether));
-        assertEq(gem("gold", address(this)), 900 ether);
+        uint auction = cat.liquidateCdp("gold", address(this));
+        assertEq(cat.litter(), fxp45Int(75 ether));
+        assertEq(collateralBalance("gold", address(this)), 50 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 75 ether);
+        assertEq(settlement.badDebt(now), fxp45Int(75 ether));
+        assertEq(collateralToken("gold", address(this)), 900 ether);
 
-        assertEq(vat.dai(address(this)), rad(150 ether));
-        assertEq(vat.dai(address(vow)),    rad(0 ether));
-        flip.tend(auction, 50 ether, rad( 1 ether));
-        assertEq(cat.litter(), rad(75 ether));
-        assertEq(vat.dai(address(this)), rad(149 ether));
-        flip.tend(auction, 50 ether, rad(75 ether));
-        assertEq(vat.dai(address(this)), rad(75 ether));
+        assertEq(cdpCore.dai(address(this)), fxp45Int(150 ether));
+        assertEq(cdpCore.dai(address(settlement)),    fxp45Int(0 ether));
+        collateralForDaiAuction.makeBidIncreaseBidSize(auction, 50 ether, fxp45Int( 1 ether));
+        assertEq(cat.litter(), fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(this)), fxp45Int(149 ether));
+        collateralForDaiAuction.makeBidIncreaseBidSize(auction, 50 ether, fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(this)), fxp45Int(75 ether));
 
-        assertEq(gem("gold", address(this)),  900 ether);
-        flip.dent(auction, 25 ether, rad(75 ether));
-        assertEq(cat.litter(), rad(75 ether));
-        assertEq(vat.dai(address(this)), rad(75 ether));
-        assertEq(gem("gold", address(this)), 925 ether);
-        assertEq(vow.sin(now), rad(75 ether));
+        assertEq(collateralToken("gold", address(this)),  900 ether);
+        collateralForDaiAuction.makeBidDecreaseLotSize(auction, 25 ether, fxp45Int(75 ether));
+        assertEq(cat.litter(), fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(this)), fxp45Int(75 ether));
+        assertEq(collateralToken("gold", address(this)), 925 ether);
+        assertEq(settlement.badDebt(now), fxp45Int(75 ether));
 
-        // From testFail_fill_litterbox() we know another bite() here would
-        // fail with a 'Cat/liquidation-limit-hit' revert.  So let's deal()
-        // and then bite() again once there is more capacity in the litterbox
+        // From testFail_fill_litterbox() we know another liquidateCdp() here would
+        // fail with a 'Liquidation/liquidation-limit-hit' revert.  So let's claimWinningBid()
+        // and then liquidateCdp() again once there is more capacity in the litterbox
 
         hevm.warp(now + 4 hours);
-        flip.deal(auction);
+        collateralForDaiAuction.claimWinningBid(auction);
         assertEq(cat.litter(), 0);
-        assertEq(gem("gold", address(this)), 950 ether);
-        assertEq(vat.dai(address(this)),  rad(75 ether));
-        assertEq(vat.dai(address(vow)),   rad(75 ether));
+        assertEq(collateralToken("gold", address(this)), 950 ether);
+        assertEq(cdpCore.dai(address(this)),  fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(settlement)),   fxp45Int(75 ether));
 
-        // now bite more
-        auction = cat.bite("gold", address(this));
-        assertEq(cat.litter(), rad(75 ether));
-        assertEq(ink("gold", address(this)), 0);
-        assertEq(art("gold", address(this)), 0);
-        assertEq(vow.sin(now), rad(75 ether));
-        assertEq(gem("gold", address(this)), 950 ether);
+        // now liquidateCdp more
+        auction = cat.liquidateCdp("gold", address(this));
+        assertEq(cat.litter(), fxp45Int(75 ether));
+        assertEq(collateralBalance("gold", address(this)), 0);
+        assertEq(stablecoinDebt("gold", address(this)), 0);
+        assertEq(settlement.badDebt(now), fxp45Int(75 ether));
+        assertEq(collateralToken("gold", address(this)), 950 ether);
 
-        assertEq(vat.dai(address(this)), rad(75 ether));
-        assertEq(vat.dai(address(vow)),  rad(75 ether));
-        flip.tend(auction, 50 ether, rad( 1 ether));
-        assertEq(cat.litter(), rad(75 ether));
-        assertEq(vat.dai(address(this)), rad(74 ether));
-        flip.tend(auction, 50 ether, rad(75 ether));
-        assertEq(vat.dai(address(this)), 0);
+        assertEq(cdpCore.dai(address(this)), fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(settlement)),  fxp45Int(75 ether));
+        collateralForDaiAuction.makeBidIncreaseBidSize(auction, 50 ether, fxp45Int( 1 ether));
+        assertEq(cat.litter(), fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(this)), fxp45Int(74 ether));
+        collateralForDaiAuction.makeBidIncreaseBidSize(auction, 50 ether, fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(this)), 0);
 
-        assertEq(gem("gold", address(this)),  950 ether);
-        flip.dent(auction, 25 ether, rad(75 ether));
-        assertEq(cat.litter(), rad(75 ether));
-        assertEq(vat.dai(address(this)), 0);
-        assertEq(gem("gold", address(this)), 975 ether);
-        assertEq(vow.sin(now), rad(75 ether));
+        assertEq(collateralToken("gold", address(this)),  950 ether);
+        collateralForDaiAuction.makeBidDecreaseLotSize(auction, 25 ether, fxp45Int(75 ether));
+        assertEq(cat.litter(), fxp45Int(75 ether));
+        assertEq(cdpCore.dai(address(this)), 0);
+        assertEq(collateralToken("gold", address(this)), 975 ether);
+        assertEq(settlement.badDebt(now), fxp45Int(75 ether));
 
         hevm.warp(now + 4 hours);
-        flip.deal(auction);
+        collateralForDaiAuction.claimWinningBid(auction);
         assertEq(cat.litter(), 0);
-        assertEq(gem("gold", address(this)),  1000 ether);
-        assertEq(vat.dai(address(this)), 0);
-        assertEq(vat.dai(address(vow)),  rad(150 ether));
+        assertEq(collateralToken("gold", address(this)),  1000 ether);
+        assertEq(cdpCore.dai(address(this)), 0);
+        assertEq(cdpCore.dai(address(settlement)),  fxp45Int(150 ether));
     }
 
     function testFail_null_auctions_dart_realistic_values() public {
-        vat.file("gold", "dust", rad(100 ether));
-        vat.file("gold", "spot", ray(2.5 ether));
-        vat.file("gold", "line", rad(2000 ether));
-        vat.file("Line",         rad(2000 ether));
-        vat.fold("gold", address(vow), int256(ray(0.25 ether)));
-        vat.frob("gold", me, me, me, 800 ether, 2000 ether);
+        cdpCore.changeConfig("gold", "dust", fxp45Int(100 ether));
+        cdpCore.changeConfig("gold", "maxDaiPerUnitOfCollateral", fxp27Int(2.5 ether));
+        cdpCore.changeConfig("gold", "debtCeiling", fxp45Int(2000 ether));
+        cdpCore.changeConfig("totalDebtCeiling",         fxp45Int(2000 ether));
+        cdpCore.changeDebtMultiplier("gold", address(settlement), int256(fxp27Int(0.25 ether)));
+        cdpCore.modifyCDP("gold", me, me, me, 800 ether, 2000 ether);
 
-        vat.file("gold", 'spot', ray(1 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(1 ether));  // now unsafe
 
         // slightly contrived value to leave tiny amount of room post-liquidation
-        cat.file("box", rad(1130 ether) + 1);
-        cat.file("gold", "dunk", rad(1130 ether));
-        cat.file("gold", "chop", 1.13 ether);
-        cat.bite("gold", me);
-        assertEq(cat.litter(), rad(1130 ether));
+        cat.changeConfig("box", fxp45Int(1130 ether) + 1);
+        cat.changeConfig("gold", "dunk", fxp45Int(1130 ether));
+        cat.changeConfig("gold", "liquidationPenalty", 1.13 ether);
+        cat.liquidateCdp("gold", me);
+        assertEq(cat.litter(), fxp45Int(1130 ether));
         uint room = cat.box() - cat.litter();
         assertEq(room, 1);
-        (, uint256 rate,,,) = vat.ilks("gold");
-        (, uint256 chop,) = cat.ilks("gold");
-        assertEq(room * (1 ether) / rate / chop, 0);
+        (, uint256 debtMultiplierIncludingStabilityFee,,,) = cdpCore.collateralTypes("gold");
+        (, uint256 liquidationPenalty,) = cat.collateralTypes("gold");
+        assertEq(room * (1 ether) / debtMultiplierIncludingStabilityFee / liquidationPenalty, 0);
 
         // Biting any non-zero amount of debt would overflow the box,
         // so this should revert and not create a null auction.
         // In this case we're protected by the dustiness check on room.
-        cat.bite("gold", me);
+        cat.liquidateCdp("gold", me);
     }
 
     function testFail_null_auctions_dart_artificial_values() public {
         // artificially tiny dust value, e.g. due to misconfiguration
-        vat.file("dust", "dust", 1);
-        vat.file("gold", "spot", ray(2.5 ether));
-        vat.frob("gold", me, me, me, 100 ether, 200 ether);
+        cdpCore.changeConfig("dust", "dust", 1);
+        cdpCore.changeConfig("gold", "maxDaiPerUnitOfCollateral", fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 100 ether, 200 ether);
 
-        vat.file("gold", 'spot', ray(1 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(1 ether));  // now unsafe
 
         // contrived value to leave tiny amount of room post-liquidation
-        cat.file("box", rad(113 ether) + 2);
-        cat.file("gold", "dunk", rad(113  ether));
-        cat.file("gold", "chop", 1.13 ether);
-        cat.bite("gold", me);
-        assertEq(cat.litter(), rad(113 ether));
+        cat.changeConfig("box", fxp45Int(113 ether) + 2);
+        cat.changeConfig("gold", "dunk", fxp45Int(113  ether));
+        cat.changeConfig("gold", "liquidationPenalty", 1.13 ether);
+        cat.liquidateCdp("gold", me);
+        assertEq(cat.litter(), fxp45Int(113 ether));
         uint room = cat.box() - cat.litter();
         assertEq(room, 2);
-        (, uint256 rate,,,) = vat.ilks("gold");
-        (, uint256 chop,) = cat.ilks("gold");
-        assertEq(room * (1 ether) / rate / chop, 0);
+        (, uint256 debtMultiplierIncludingStabilityFee,,,) = cdpCore.collateralTypes("gold");
+        (, uint256 liquidationPenalty,) = cat.collateralTypes("gold");
+        assertEq(room * (1 ether) / debtMultiplierIncludingStabilityFee / liquidationPenalty, 0);
 
         // Biting any non-zero amount of debt would overflow the box,
         // so this should revert and not create a null auction.
         // The dustiness check on room doesn't apply here, so additional
         // logic is needed to make this test pass.
-        cat.bite("gold", me);
+        cat.liquidateCdp("gold", me);
     }
 
     function testFail_null_auctions_dink_artificial_values() public {
-        // we're going to make 1 wei of ink worth 250
-        vat.file("gold", "spot", ray(250 ether) * 1 ether);
-        cat.file("gold", "dunk", rad(50 ether));
-        vat.frob("gold", me, me, me, 1, 100 ether);
+        // we're going to make 1 wei of collateralBalance worth 250
+        cdpCore.changeConfig("gold", "maxDaiPerUnitOfCollateral", fxp27Int(250 ether) * 1 ether);
+        cat.changeConfig("gold", "dunk", fxp45Int(50 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 1, 100 ether);
 
-        vat.file("gold", 'spot', 1);  // massive price crash, now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', 1);  // massive price crash, now unsafe
 
-        // This should leave us with 0 dink value, and fail
-        cat.bite("gold", me);
+        // This should leave us with 0 changeInCollateral value, and fail
+        cat.liquidateCdp("gold", me);
     }
 
     function testFail_null_auctions_dink_artificial_values_2() public {
-        vat.file("gold", "spot", ray(2000 ether));
-        vat.file("gold", "line", rad(20000 ether));
-        vat.file("Line",         rad(20000 ether));
-        vat.frob("gold", me, me, me, 10 ether, 15000 ether);
+        cdpCore.changeConfig("gold", "maxDaiPerUnitOfCollateral", fxp27Int(2000 ether));
+        cdpCore.changeConfig("gold", "debtCeiling", fxp45Int(20000 ether));
+        cdpCore.changeConfig("totalDebtCeiling",         fxp45Int(20000 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 10 ether, 15000 ether);
 
-        cat.file("box", rad(1000000 ether));  // plenty of room
+        cat.changeConfig("box", fxp45Int(1000000 ether));  // plenty of room
 
         // misconfigured dunk (e.g. precision factor incorrect in spell)
-        cat.file("gold", "dunk", rad(100));
+        cat.changeConfig("gold", "dunk", fxp45Int(100));
 
-        vat.file("gold", 'spot', ray(1000 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(1000 ether));  // now unsafe
 
-        // This should leave us with 0 dink value, and fail
-        cat.bite("gold", me);
+        // This should leave us with 0 changeInCollateral value, and fail
+        cat.liquidateCdp("gold", me);
     }
 
     function testFail_null_spot_value() public {
-        // spot = tag / (par . mat)
+        // maxDaiPerUnitOfCollateral = tag / (par . mat)
         // tag=5, mat=2
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 100 ether, 150 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 100 ether, 150 ether);
 
-        vat.file("gold", 'spot', ray(1 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(1 ether));  // now unsafe
 
-        assertEq(ink("gold", address(this)), 100 ether);
-        assertEq(art("gold", address(this)), 150 ether);
-        assertEq(vow.Woe(), 0 ether);
-        assertEq(gem("gold", address(this)), 900 ether);
+        assertEq(collateralBalance("gold", address(this)), 100 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 150 ether);
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(), 0 ether);
+        assertEq(collateralToken("gold", address(this)), 900 ether);
 
-        cat.file("gold", "dunk", rad(75 ether));
+        cat.changeConfig("gold", "dunk", fxp45Int(75 ether));
         assertEq(cat.litter(), 0);
-        cat.bite("gold", address(this));
-        assertEq(cat.litter(), rad(75 ether));
-        assertEq(ink("gold", address(this)), 50 ether);
-        assertEq(art("gold", address(this)), 75 ether);
-        assertEq(vow.sin(now), rad(75 ether));
-        assertEq(gem("gold", address(this)), 900 ether);
+        cat.liquidateCdp("gold", address(this));
+        assertEq(cat.litter(), fxp45Int(75 ether));
+        assertEq(collateralBalance("gold", address(this)), 50 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 75 ether);
+        assertEq(settlement.badDebt(now), fxp45Int(75 ether));
+        assertEq(collateralToken("gold", address(this)), 900 ether);
 
-        vat.file("gold", 'spot', 0);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', 0);
 
-        // this should fail because spot is 0
-        cat.bite("gold", address(this));
+        // this should fail because maxDaiPerUnitOfCollateral is 0
+        cat.liquidateCdp("gold", address(this));
     }
 
     function testFail_vault_is_safe() public {
-        // spot = tag / (par . mat)
+        // maxDaiPerUnitOfCollateral = tag / (par . mat)
         // tag=5, mat=2
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 100 ether, 150 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 100 ether, 150 ether);
 
-        assertEq(ink("gold", address(this)), 100 ether);
-        assertEq(art("gold", address(this)), 150 ether);
-        assertEq(vow.Woe(), 0 ether);
-        assertEq(gem("gold", address(this)), 900 ether);
+        assertEq(collateralBalance("gold", address(this)), 100 ether);
+        assertEq(stablecoinDebt("gold", address(this)), 150 ether);
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(), 0 ether);
+        assertEq(collateralToken("gold", address(this)), 900 ether);
 
-        cat.file("gold", "dunk", rad(75 ether));
+        cat.changeConfig("gold", "dunk", fxp45Int(75 ether));
         assertEq(cat.litter(), 0);
 
-        // this should fail because the vault is safe
-        cat.bite("gold", address(this));
+        // this should fail because the vault is isCdpSafe
+        cat.liquidateCdp("gold", address(this));
     }
 
     function test_floppy_bite() public {
-        vat.file("gold", 'spot', ray(2.5 ether));
-        vat.frob("gold", me, me, me, 40 ether, 100 ether);
-        vat.file("gold", 'spot', ray(2 ether));  // now unsafe
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2.5 ether));
+        cdpCore.modifyCDP("gold", me, me, me, 40 ether, 100 ether);
+        cdpCore.changeConfig("gold", 'maxDaiPerUnitOfCollateral', fxp27Int(2 ether));  // now unsafe
 
-        cat.file("gold", "dunk", rad(200 ether));  // => bite everything
-        assertEq(vow.sin(now), rad(  0 ether));
-        cat.bite("gold", address(this));
-        assertEq(vow.sin(now), rad(100 ether));
+        cat.changeConfig("gold", "dunk", fxp45Int(200 ether));  // => liquidateCdp everything
+        assertEq(settlement.badDebt(now), fxp45Int(  0 ether));
+        cat.liquidateCdp("gold", address(this));
+        assertEq(settlement.badDebt(now), fxp45Int(100 ether));
 
-        assertEq(vow.Sin(), rad(100 ether));
-        vow.flog(now);
-        assertEq(vow.Sin(), rad(  0 ether));
-        assertEq(vow.Woe(), rad(100 ether));
-        assertEq(vow.Joy(), rad(  0 ether));
-        assertEq(vow.Ash(), rad(  0 ether));
+        assertEq(settlement.totalDebtInDebtQueue(), fxp45Int(100 ether));
+        settlement.removeDebtFromDebtQueue(now);
+        assertEq(settlement.totalDebtInDebtQueue(), fxp45Int(  0 ether));
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(), fxp45Int(100 ether));
+        assertEq(settlement.totalSurplus(), fxp45Int(  0 ether));
+        assertEq(settlement.totalOnAuctionDebt(), fxp45Int(  0 ether));
 
-        vow.file("sump", rad(10 ether));
-        vow.file("dump", 2000 ether);
-        uint f1 = vow.flop();
-        assertEq(vow.Woe(),  rad(90 ether));
-        assertEq(vow.Joy(),  rad( 0 ether));
-        assertEq(vow.Ash(),  rad(10 ether));
-        flop.dent(f1, 1000 ether, rad(10 ether));
-        assertEq(vow.Woe(),  rad(90 ether));
-        assertEq(vow.Joy(),  rad( 0 ether));
-        assertEq(vow.Ash(),  rad( 0 ether));
+        settlement.changeConfig("debtAuctionLotSize", fxp45Int(10 ether));
+        settlement.changeConfig("dump", 2000 ether);
+        uint f1 = settlement.startBadDebtAuction();
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(),  fxp45Int(90 ether));
+        assertEq(settlement.totalSurplus(),  fxp45Int( 0 ether));
+        assertEq(settlement.totalOnAuctionDebt(),  fxp45Int(10 ether));
+        flop.makeBidDecreaseLotSize(f1, 1000 ether, fxp45Int(10 ether));
+        assertEq(settlement.totalNonQueuedNonAuctionDebt(),  fxp45Int(90 ether));
+        assertEq(settlement.totalSurplus(),  fxp45Int( 0 ether));
+        assertEq(settlement.totalOnAuctionDebt(),  fxp45Int( 0 ether));
 
         assertEq(gov.balanceOf(address(this)),  100 ether);
         hevm.warp(now + 4 hours);
         gov.setOwner(address(flop));
-        flop.deal(f1);
+        flop.claimWinningBid(f1);
         assertEq(gov.balanceOf(address(this)), 1100 ether);
     }
 
     function test_flappy_bite() public {
         // get some surplus
-        vat.mint(address(vow), 100 ether);
-        assertEq(vat.dai(address(vow)),    rad(100 ether));
+        cdpCore.mint(address(settlement), 100 ether);
+        assertEq(cdpCore.dai(address(settlement)),    fxp45Int(100 ether));
         assertEq(gov.balanceOf(address(this)), 100 ether);
 
-        vow.file("bump", rad(100 ether));
-        assertEq(vow.Awe(), 0 ether);
-        uint id = vow.flap();
+        settlement.changeConfig("surplusAuctionLotSize", fxp45Int(100 ether));
+        assertEq(settlement.totalDebt(), 0 ether);
+        uint id = settlement.startSurplusAuction();
 
-        assertEq(vat.dai(address(this)),     rad(0 ether));
+        assertEq(cdpCore.dai(address(this)),     fxp45Int(0 ether));
         assertEq(gov.balanceOf(address(this)), 100 ether);
-        flap.tend(id, rad(100 ether), 10 ether);
+        flap.makeBidIncreaseBidSize(id, fxp45Int(100 ether), 10 ether);
         hevm.warp(now + 4 hours);
         gov.setOwner(address(flap));
-        flap.deal(id);
-        assertEq(vat.dai(address(this)),     rad(100 ether));
+        flap.claimWinningBid(id);
+        assertEq(cdpCore.dai(address(this)),     fxp45Int(100 ether));
         assertEq(gov.balanceOf(address(this)),    90 ether);
     }
 }
 
 contract FoldTest is DSTest {
-    Vat vat;
+    CDPCore cdpCore;
 
-    function ray(uint wad) internal pure returns (uint) {
-        return wad * 10 ** 9;
+    function fxp27Int(uint fxp18Int) internal pure returns (uint) {
+        return fxp18Int * 10 ** 9;
     }
-    function rad(uint wad) internal pure returns (uint) {
-        return wad * 10 ** 27;
+    function fxp45Int(uint fxp18Int) internal pure returns (uint) {
+        return fxp18Int * 10 ** 27;
     }
-    function tab(bytes32 ilk, address urn) internal view returns (uint) {
-        (uint ink_, uint art_) = vat.urns(ilk, urn); ink_;
-        (uint Art_, uint rate, uint spot, uint line, uint dust) = vat.ilks(ilk);
-        Art_; spot; line; dust;
-        return art_ * rate;
+    function tab(bytes32 collateralType, address cdp) internal view returns (uint) {
+        (uint ink_, uint art_) = cdpCore.cdps(collateralType, cdp); ink_;
+        (uint Art_, uint debtMultiplierIncludingStabilityFee, uint maxDaiPerUnitOfCollateral, uint debtCeiling, uint dust) = cdpCore.collateralTypes(collateralType);
+        Art_; maxDaiPerUnitOfCollateral; debtCeiling; dust;
+        return art_ * debtMultiplierIncludingStabilityFee;
     }
-    function jam(bytes32 ilk, address urn) internal view returns (uint) {
-        (uint ink_, uint art_) = vat.urns(ilk, urn); art_;
+    function jam(bytes32 collateralType, address cdp) internal view returns (uint) {
+        (uint ink_, uint art_) = cdpCore.cdps(collateralType, cdp); art_;
         return ink_;
     }
 
     function setUp() public {
-        vat = new Vat();
-        vat.init("gold");
-        vat.file("Line", rad(100 ether));
-        vat.file("gold", "line", rad(100 ether));
+        cdpCore = new CDPCore();
+        cdpCore.createNewCollateralType("gold");
+        cdpCore.changeConfig("totalDebtCeiling", fxp45Int(100 ether));
+        cdpCore.changeConfig("gold", "debtCeiling", fxp45Int(100 ether));
     }
-    function draw(bytes32 ilk, uint dai) internal {
-        vat.file("Line", rad(dai));
-        vat.file(ilk, "line", rad(dai));
-        vat.file(ilk, "spot", 10 ** 27 * 10000 ether);
+    function increaseCDPDebt(bytes32 collateralType, uint dai) internal {
+        cdpCore.changeConfig("totalDebtCeiling", fxp45Int(dai));
+        cdpCore.changeConfig(collateralType, "debtCeiling", fxp45Int(dai));
+        cdpCore.changeConfig(collateralType, "maxDaiPerUnitOfCollateral", 10 ** 27 * 10000 ether);
         address self = address(this);
-        vat.slip(ilk, self,  10 ** 27 * 1 ether);
-        vat.frob(ilk, self, self, self, int(1 ether), int(dai));
+        cdpCore.modifyUsersCollateralBalance(collateralType, self,  10 ** 27 * 1 ether);
+        cdpCore.modifyCDP(collateralType, self, self, self, int(1 ether), int(dai));
     }
     function test_fold() public {
         address self = address(this);
         address ali  = address(bytes20("ali"));
-        draw("gold", 1 ether);
+        increaseCDPDebt("gold", 1 ether);
 
-        assertEq(tab("gold", self), rad(1.00 ether));
-        vat.fold("gold", ali,   int(ray(0.05 ether)));
-        assertEq(tab("gold", self), rad(1.05 ether));
-        assertEq(vat.dai(ali),      rad(0.05 ether));
+        assertEq(tab("gold", self), fxp45Int(1.00 ether));
+        cdpCore.changeDebtMultiplier("gold", ali,   int(fxp27Int(0.05 ether)));
+        assertEq(tab("gold", self), fxp45Int(1.05 ether));
+        assertEq(cdpCore.dai(ali),      fxp45Int(0.05 ether));
     }
 }

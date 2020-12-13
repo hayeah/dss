@@ -4,7 +4,7 @@
 
 // Copyright (C) 2015-2019  DappHub, LLC
 
-// This program is free software: you can redistribute it and/or modify
+// This program is transferCollateralFromCDP software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
@@ -63,23 +63,23 @@ contract TokenUser {
         return token.balanceOf(who);
     }
 
-    function doApprove(address guy)
+    function doApprove(address highBidder)
         public
         returns (bool)
     {
-        return token.approve(guy, uint(-1));
+        return token.approve(highBidder, uint(-1));
     }
-    function doMint(uint wad) public {
-        token.mint(address(this), wad);
+    function doMint(uint fxp18Int) public {
+        token.mint(address(this), fxp18Int);
     }
-    function doBurn(uint wad) public {
-        token.burn(address(this), wad);
+    function doBurn(uint fxp18Int) public {
+        token.burn(address(this), fxp18Int);
     }
-    function doMint(address guy, uint wad) public {
-        token.mint(guy, wad);
+    function doMint(address highBidder, uint fxp18Int) public {
+        token.mint(highBidder, fxp18Int);
     }
-    function doBurn(address guy, uint wad) public {
-        token.burn(guy, wad);
+    function doBurn(address highBidder, uint fxp18Int) public {
+        token.burn(highBidder, fxp18Int);
     }
 
 }
@@ -207,7 +207,7 @@ contract DaiTest is DSTest {
         TokenUser(user1).doMint(user2, 10);
     }
     function testMintGuyAuth() public {
-        token.rely(user1);
+        token.authorizeAddress(user1);
         TokenUser(user1).doMint(user2, 10);
     }
 
@@ -232,12 +232,12 @@ contract DaiTest is DSTest {
     }
     function testBurnAuth() public {
         token.transfer(user1, 10);
-        token.rely(user1);
+        token.authorizeAddress(user1);
         TokenUser(user1).doBurn(10);
     }
     function testBurnGuyAuth() public {
         token.transfer(user2, 10);
-        //        token.rely(user1);
+        //        token.authorizeAddress(user1);
         TokenUser(user2).doApprove(user1);
         TokenUser(user1).doBurn(user2, 10);
     }

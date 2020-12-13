@@ -4,7 +4,7 @@
 
 // Copyright (C) 2018 Rain <rainbreak@riseup.net>
 //
-// This program is free software: you can redistribute it and/or modify
+// This program is transferCollateralFromCDP software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
@@ -21,76 +21,76 @@ pragma solidity >=0.5.12;
 
 import "./lib.sol";
 
-interface VatLike {
-    function move(address,address,uint) external;
-    function suck(address,address,uint) external;
+interface CDPCoreInterface {
+    function transfer(address,address,uint) external;
+    function issueBadDebt(address,address,uint) external;
 }
-interface GemLike {
+interface CollateralTokensInterface {
     function mint(address,uint) external;
 }
-interface VowLike {
-    function Ash() external returns (uint);
-    function kiss(uint) external;
+interface SettlementInterface {
+    function totalOnAuctionDebt() external returns (uint);
+    function settleOnAuctionDebtUsingSurplus(uint) external;
 }
 
 /*
-   This thing creates gems on demand in return for dai.
+   This thing creates collateralTokens on demand in return for dai.
 
- - `lot` gems in return for bid
+ - `lot` collateralTokens in return for bid
  - `bid` dai paid
- - `gal` receives dai income
+ - `incomeRecipient` receives dai income
  - `ttl` single bid lifetime
- - `beg` minimum bid increase
- - `end` max auction duration
+ - `minimumBidIncrease` minimum bid increase
+ - `auctionEndTimestamp` max auction duration
 */
 
-contract Flopper is LibNote {
+contract BadDebtAuction is LibNote {
     // --- Auth ---
-    mapping (address => uint) public wards;
-    function rely(address usr) external note auth { wards[usr] = 1; }
-    function deny(address usr) external note auth { wards[usr] = 0; }
-    modifier auth {
-        require(wards[msg.sender] == 1, "Flopper/not-authorized");
+    mapping (address => uint) public auths;
+    function authorizeAddress(address usr) external note isAuthorized { auths[usr] = 1; }
+    function deauthorizeAddress(address usr) external note isAuthorized { auths[usr] = 0; }
+    modifier isAuthorized {
+        require(auths[msg.sender] == 1, "BadDebtAuction/not-authorized");
         _;
     }
 
     // --- Data ---
     struct Bid {
-        uint256 bid;  // dai paid                [rad]
-        uint256 lot;  // gems in return for bid  [wad]
-        address guy;  // high bidder
-        uint48  tic;  // bid expiry time         [unix epoch time]
-        uint48  end;  // auction expiry time     [unix epoch time]
+        uint256 bid;  // dai paid                [fxp45Int]
+        uint256 lot;  // collateralTokens in return for bid  [fxp18Int]
+        address highBidder;  // high bidder
+        uint48  bidExpiry;  // bid expiry time         [unix epoch time]
+        uint48  auctionEndTimestamp;  // auction expiry time     [unix epoch time]
     }
 
     mapping (uint => Bid) public bids;
 
-    VatLike  public   vat;  // CDP Engine
-    GemLike  public   gem;
+    CDPCoreInterface  public   cdpCore;  // CDP Engine
+    CollateralTokensInterface  public   collateralToken;
 
     uint256  constant ONE = 1.00E18;
-    uint256  public   beg = 1.05E18;  // 5% minimum bid increase
-    uint256  public   pad = 1.50E18;  // 50% lot increase for tick
+    uint256  public   minimumBidIncrease = 1.05E18;  // 5% minimum bid increase
+    uint256  public   pad = 1.50E18;  // 50% lot increase for restartAuction
     uint48   public   ttl = 3 hours;  // 3 hours bid lifetime         [seconds]
-    uint48   public   tau = 2 days;   // 2 days total auction length  [seconds]
+    uint48   public   maximumAuctionDuration = 2 days;   // 2 days total auction length  [seconds]
     uint256  public kicks = 0;
-    uint256  public live;             // Active Flag
-    address  public vow;              // not used until shutdown
+    uint256  public isAlive;             // Active Flag
+    address  public settlement;              // not used until shutdown
 
     // --- Events ---
-    event Kick(
+    event StartAuction(
       uint256 id,
       uint256 lot,
       uint256 bid,
-      address indexed gal
+      address indexed incomeRecipient
     );
 
     // --- Init ---
-    constructor(address vat_, address gem_) public {
-        wards[msg.sender] = 1;
-        vat = VatLike(vat_);
-        gem = GemLike(gem_);
-        live = 1;
+    constructor(address core_, address collateralToken_) public {
+        auths[msg.sender] = 1;
+        cdpCore = CDPCoreInterface(core_);
+        collateralToken = CollateralTokensInterface(collateralToken_);
+        isAlive = 1;
     }
 
     // --- Math ---
@@ -105,74 +105,74 @@ contract Flopper is LibNote {
     }
 
     // --- Admin ---
-    function file(bytes32 what, uint data) external note auth {
-        if (what == "beg") beg = data;
+    function changeConfig(bytes32 what, uint data) external note isAuthorized {
+        if (what == "minimumBidIncrease") minimumBidIncrease = data;
         else if (what == "pad") pad = data;
         else if (what == "ttl") ttl = uint48(data);
-        else if (what == "tau") tau = uint48(data);
-        else revert("Flopper/file-unrecognized-param");
+        else if (what == "maximumAuctionDuration") maximumAuctionDuration = uint48(data);
+        else revert("BadDebtAuction/changeConfig-unrecognized-param");
     }
 
     // --- Auction ---
-    function kick(address gal, uint lot, uint bid) external auth returns (uint id) {
-        require(live == 1, "Flopper/not-live");
-        require(kicks < uint(-1), "Flopper/overflow");
+    function startAuction(address incomeRecipient, uint lot, uint bid) external isAuthorized returns (uint id) {
+        require(isAlive == 1, "BadDebtAuction/not-isAlive");
+        require(kicks < uint(-1), "BadDebtAuction/overflow");
         id = ++kicks;
 
         bids[id].bid = bid;
         bids[id].lot = lot;
-        bids[id].guy = gal;
-        bids[id].end = add(uint48(now), tau);
+        bids[id].highBidder = incomeRecipient;
+        bids[id].auctionEndTimestamp = add(uint48(now), maximumAuctionDuration);
 
-        emit Kick(id, lot, bid, gal);
+        emit StartAuction(id, lot, bid, incomeRecipient);
     }
-    function tick(uint id) external note {
-        require(bids[id].end < now, "Flopper/not-finished");
-        require(bids[id].tic == 0, "Flopper/bid-already-placed");
+    function restartAuction(uint id) external note {
+        require(bids[id].auctionEndTimestamp < now, "BadDebtAuction/not-finished");
+        require(bids[id].bidExpiry == 0, "BadDebtAuction/bid-already-placed");
         bids[id].lot = mul(pad, bids[id].lot) / ONE;
-        bids[id].end = add(uint48(now), tau);
+        bids[id].auctionEndTimestamp = add(uint48(now), maximumAuctionDuration);
     }
-    function dent(uint id, uint lot, uint bid) external note {
-        require(live == 1, "Flopper/not-live");
-        require(bids[id].guy != address(0), "Flopper/guy-not-set");
-        require(bids[id].tic > now || bids[id].tic == 0, "Flopper/already-finished-tic");
-        require(bids[id].end > now, "Flopper/already-finished-end");
+    function makeBidDecreaseLotSize(uint id, uint lot, uint bid) external note {
+        require(isAlive == 1, "BadDebtAuction/not-isAlive");
+        require(bids[id].highBidder != address(0), "BadDebtAuction/highBidder-not-set");
+        require(bids[id].bidExpiry > now || bids[id].bidExpiry == 0, "BadDebtAuction/already-finished-bidExpiry");
+        require(bids[id].auctionEndTimestamp > now, "BadDebtAuction/already-finished-auctionEndTimestamp");
 
-        require(bid == bids[id].bid, "Flopper/not-matching-bid");
-        require(lot <  bids[id].lot, "Flopper/lot-not-lower");
-        require(mul(beg, lot) <= mul(bids[id].lot, ONE), "Flopper/insufficient-decrease");
+        require(bid == bids[id].bid, "BadDebtAuction/not-matching-bid");
+        require(lot <  bids[id].lot, "BadDebtAuction/lot-not-lower");
+        require(mul(minimumBidIncrease, lot) <= mul(bids[id].lot, ONE), "BadDebtAuction/insufficient-decrease");
 
-        if (msg.sender != bids[id].guy) {
-            vat.move(msg.sender, bids[id].guy, bid);
+        if (msg.sender != bids[id].highBidder) {
+            cdpCore.transfer(msg.sender, bids[id].highBidder, bid);
 
-            // on first dent, clear as much Ash as possible
-            if (bids[id].tic == 0) {
-                uint Ash = VowLike(bids[id].guy).Ash();
-                VowLike(bids[id].guy).kiss(min(bid, Ash));
+            // on first makeBidDecreaseLotSize, clear as much totalOnAuctionDebt as possible
+            if (bids[id].bidExpiry == 0) {
+                uint totalOnAuctionDebt = SettlementInterface(bids[id].highBidder).totalOnAuctionDebt();
+                SettlementInterface(bids[id].highBidder).settleOnAuctionDebtUsingSurplus(min(bid, totalOnAuctionDebt));
             }
 
-            bids[id].guy = msg.sender;
+            bids[id].highBidder = msg.sender;
         }
 
         bids[id].lot = lot;
-        bids[id].tic = add(uint48(now), ttl);
+        bids[id].bidExpiry = add(uint48(now), ttl);
     }
-    function deal(uint id) external note {
-        require(live == 1, "Flopper/not-live");
-        require(bids[id].tic != 0 && (bids[id].tic < now || bids[id].end < now), "Flopper/not-finished");
-        gem.mint(bids[id].guy, bids[id].lot);
+    function claimWinningBid(uint id) external note {
+        require(isAlive == 1, "BadDebtAuction/not-isAlive");
+        require(bids[id].bidExpiry != 0 && (bids[id].bidExpiry < now || bids[id].auctionEndTimestamp < now), "BadDebtAuction/not-finished");
+        collateralToken.mint(bids[id].highBidder, bids[id].lot);
         delete bids[id];
     }
 
     // --- Shutdown ---
-    function cage() external note auth {
-       live = 0;
-       vow = msg.sender;
+    function disable() external note isAuthorized {
+       isAlive = 0;
+       settlement = msg.sender;
     }
-    function yank(uint id) external note {
-        require(live == 0, "Flopper/still-live");
-        require(bids[id].guy != address(0), "Flopper/guy-not-set");
-        vat.suck(vow, bids[id].guy, bids[id].bid);
+    function closeBid(uint id) external note {
+        require(isAlive == 0, "BadDebtAuction/still-isAlive");
+        require(bids[id].highBidder != address(0), "BadDebtAuction/highBidder-not-set");
+        cdpCore.issueBadDebt(settlement, bids[id].highBidder, bids[id].bid);
         delete bids[id];
     }
 }

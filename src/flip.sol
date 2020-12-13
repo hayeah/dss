@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-/// flip.sol -- Collateral auction
+/// collateralForDaiAuction.sol -- Collateral auction
 
 // Copyright (C) 2018 Rain <rainbreak@riseup.net>
 //
-// This program is free software: you can redistribute it and/or modify
+// This program is transferCollateralFromCDP software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
@@ -21,9 +21,9 @@ pragma solidity >=0.5.12;
 
 import "./lib.sol";
 
-interface VatLike {
-    function move(address,address,uint256) external;
-    function flux(bytes32,address,address,uint256) external;
+interface CDPCoreInterface {
+    function transfer(address,address,uint256) external;
+    function transferCollateral(bytes32,address,address,uint256) external;
 }
 
 interface CatLike {
@@ -31,69 +31,69 @@ interface CatLike {
 }
 
 /*
-   This thing lets you flip some gems for a given amount of dai.
-   Once the given amount of dai is raised, gems are forgone instead.
+   This thing lets you collateralForDaiAuction some collateralTokens for a given amount of dai.
+   Once the given amount of dai is raised, collateralTokens are forgone instead.
 
- - `lot` gems in return for bid
+ - `lot` collateralTokens in return for bid
  - `tab` total dai wanted
  - `bid` dai paid
- - `gal` receives dai income
- - `usr` receives gem forgone
+ - `incomeRecipient` receives dai income
+ - `usr` receives collateralToken forgone
  - `ttl` single bid lifetime
- - `beg` minimum bid increase
- - `end` max auction duration
+ - `minimumBidIncrease` minimum bid increase
+ - `auctionEndTimestamp` max auction duration
 */
 
 contract Flipper is LibNote {
     // --- Auth ---
-    mapping (address => uint256) public wards;
-    function rely(address usr) external note auth { wards[usr] = 1; }
-    function deny(address usr) external note auth { wards[usr] = 0; }
-    modifier auth {
-        require(wards[msg.sender] == 1, "Flipper/not-authorized");
+    mapping (address => uint256) public auths;
+    function authorizeAddress(address usr) external note isAuthorized { auths[usr] = 1; }
+    function deauthorizeAddress(address usr) external note isAuthorized { auths[usr] = 0; }
+    modifier isAuthorized {
+        require(auths[msg.sender] == 1, "Flipper/not-authorized");
         _;
     }
 
     // --- Data ---
     struct Bid {
-        uint256 bid;  // dai paid                 [rad]
-        uint256 lot;  // gems in return for bid   [wad]
-        address guy;  // high bidder
-        uint48  tic;  // bid expiry time          [unix epoch time]
-        uint48  end;  // auction expiry time      [unix epoch time]
+        uint256 bid;  // dai paid                 [fxp45Int]
+        uint256 lot;  // collateralTokens in return for bid   [fxp18Int]
+        address highBidder;  // high bidder
+        uint48  bidExpiry;  // bid expiry time          [unix epoch time]
+        uint48  auctionEndTimestamp;  // auction expiry time      [unix epoch time]
         address usr;
-        address gal;
-        uint256 tab;  // total dai wanted         [rad]
+        address incomeRecipient;
+        uint256 tab;  // total dai wanted         [fxp45Int]
     }
 
     mapping (uint256 => Bid) public bids;
 
-    VatLike public   vat;            // CDP Engine
-    bytes32 public   ilk;            // collateral type
+    CDPCoreInterface public   cdpCore;            // CDP Engine
+    bytes32 public   collateralType;            // collateral type
 
     uint256 constant ONE = 1.00E18;
-    uint256 public   beg = 1.05E18;  // 5% minimum bid increase
+    uint256 public   minimumBidIncrease = 1.05E18;  // 5% minimum bid increase
     uint48  public   ttl = 3 hours;  // 3 hours bid duration         [seconds]
-    uint48  public   tau = 2 days;   // 2 days total auction length  [seconds]
+    uint48  public   maximumAuctionDuration = 2 days;   // 2 days total auction length  [seconds]
     uint256 public kicks = 0;
     CatLike public   cat;            // cat liquidation module
 
     // --- Events ---
-    event Kick(
+    event StartAuction(
       uint256 id,
       uint256 lot,
       uint256 bid,
       uint256 tab,
       address indexed usr,
-      address indexed gal
+      address indexed incomeRecipient
     );
 
     // --- Init ---
-    constructor(address vat_, address cat_, bytes32 ilk_) public {
-        vat = VatLike(vat_);
+    constructor(address core_, address cat_, bytes32 ilk_) public {
+        cdpCore = CDPCoreInterface(core_);
         cat = CatLike(cat_);
-        ilk = ilk_;
-        wards[msg.sender] = 1;
+        collateralType = ilk_;
+        auths[msg.sender] = 1;
     }
 
     // --- Math ---
@@ -105,92 +105,92 @@ contract Flipper is LibNote {
     }
 
     // --- Admin ---
-    function file(bytes32 what, uint256 data) external note auth {
-        if (what == "beg") beg = data;
+    function changeConfig(bytes32 what, uint256 data) external note isAuthorized {
+        if (what == "minimumBidIncrease") minimumBidIncrease = data;
         else if (what == "ttl") ttl = uint48(data);
-        else if (what == "tau") tau = uint48(data);
-        else revert("Flipper/file-unrecognized-param");
+        else if (what == "maximumAuctionDuration") maximumAuctionDuration = uint48(data);
+        else revert("Flipper/changeConfig-unrecognized-param");
     }
-    function file(bytes32 what, address data) external note auth {
+    function changeConfig(bytes32 what, address data) external note isAuthorized {
         if (what == "cat") cat = CatLike(data);
-        else revert("Flipper/file-unrecognized-param");
+        else revert("Flipper/changeConfig-unrecognized-param");
     }
 
     // --- Auction ---
-    function kick(address usr, address gal, uint256 tab, uint256 lot, uint256 bid)
-        public auth returns (uint256 id)
+    function startAuction(address usr, address incomeRecipient, uint256 tab, uint256 lot, uint256 bid)
+        public isAuthorized returns (uint256 id)
     {
         require(kicks < uint256(-1), "Flipper/overflow");
         id = ++kicks;
 
         bids[id].bid = bid;
         bids[id].lot = lot;
-        bids[id].guy = msg.sender;  // configurable??
-        bids[id].end = add(uint48(now), tau);
+        bids[id].highBidder = msg.sender;  // configurable??
+        bids[id].auctionEndTimestamp = add(uint48(now), maximumAuctionDuration);
         bids[id].usr = usr;
-        bids[id].gal = gal;
+        bids[id].incomeRecipient = incomeRecipient;
         bids[id].tab = tab;
 
-        vat.flux(ilk, msg.sender, address(this), lot);
+        cdpCore.transferCollateral(collateralType, msg.sender, address(this), lot);
 
-        emit Kick(id, lot, bid, tab, usr, gal);
+        emit StartAuction(id, lot, bid, tab, usr, incomeRecipient);
     }
-    function tick(uint256 id) external note {
-        require(bids[id].end < now, "Flipper/not-finished");
-        require(bids[id].tic == 0, "Flipper/bid-already-placed");
-        bids[id].end = add(uint48(now), tau);
+    function restartAuction(uint256 id) external note {
+        require(bids[id].auctionEndTimestamp < now, "Flipper/not-finished");
+        require(bids[id].bidExpiry == 0, "Flipper/bid-already-placed");
+        bids[id].auctionEndTimestamp = add(uint48(now), maximumAuctionDuration);
     }
-    function tend(uint256 id, uint256 lot, uint256 bid) external note {
-        require(bids[id].guy != address(0), "Flipper/guy-not-set");
-        require(bids[id].tic > now || bids[id].tic == 0, "Flipper/already-finished-tic");
-        require(bids[id].end > now, "Flipper/already-finished-end");
+    function makeBidIncreaseBidSize(uint256 id, uint256 lot, uint256 bid) external note {
+        require(bids[id].highBidder != address(0), "Flipper/highBidder-not-set");
+        require(bids[id].bidExpiry > now || bids[id].bidExpiry == 0, "Flipper/already-finished-bidExpiry");
+        require(bids[id].auctionEndTimestamp > now, "Flipper/already-finished-auctionEndTimestamp");
 
         require(lot == bids[id].lot, "Flipper/lot-not-matching");
         require(bid <= bids[id].tab, "Flipper/higher-than-tab");
         require(bid >  bids[id].bid, "Flipper/bid-not-higher");
-        require(mul(bid, ONE) >= mul(beg, bids[id].bid) || bid == bids[id].tab, "Flipper/insufficient-increase");
+        require(mul(bid, ONE) >= mul(minimumBidIncrease, bids[id].bid) || bid == bids[id].tab, "Flipper/insufficient-increase");
 
-        if (msg.sender != bids[id].guy) {
-            vat.move(msg.sender, bids[id].guy, bids[id].bid);
-            bids[id].guy = msg.sender;
+        if (msg.sender != bids[id].highBidder) {
+            cdpCore.transfer(msg.sender, bids[id].highBidder, bids[id].bid);
+            bids[id].highBidder = msg.sender;
         }
-        vat.move(msg.sender, bids[id].gal, bid - bids[id].bid);
+        cdpCore.transfer(msg.sender, bids[id].incomeRecipient, bid - bids[id].bid);
 
         bids[id].bid = bid;
-        bids[id].tic = add(uint48(now), ttl);
+        bids[id].bidExpiry = add(uint48(now), ttl);
     }
-    function dent(uint256 id, uint256 lot, uint256 bid) external note {
-        require(bids[id].guy != address(0), "Flipper/guy-not-set");
-        require(bids[id].tic > now || bids[id].tic == 0, "Flipper/already-finished-tic");
-        require(bids[id].end > now, "Flipper/already-finished-end");
+    function makeBidDecreaseLotSize(uint256 id, uint256 lot, uint256 bid) external note {
+        require(bids[id].highBidder != address(0), "Flipper/highBidder-not-set");
+        require(bids[id].bidExpiry > now || bids[id].bidExpiry == 0, "Flipper/already-finished-bidExpiry");
+        require(bids[id].auctionEndTimestamp > now, "Flipper/already-finished-auctionEndTimestamp");
 
         require(bid == bids[id].bid, "Flipper/not-matching-bid");
-        require(bid == bids[id].tab, "Flipper/tend-not-finished");
+        require(bid == bids[id].tab, "Flipper/makeBidIncreaseBidSize-not-finished");
         require(lot < bids[id].lot, "Flipper/lot-not-lower");
-        require(mul(beg, lot) <= mul(bids[id].lot, ONE), "Flipper/insufficient-decrease");
+        require(mul(minimumBidIncrease, lot) <= mul(bids[id].lot, ONE), "Flipper/insufficient-decrease");
 
-        if (msg.sender != bids[id].guy) {
-            vat.move(msg.sender, bids[id].guy, bid);
-            bids[id].guy = msg.sender;
+        if (msg.sender != bids[id].highBidder) {
+            cdpCore.transfer(msg.sender, bids[id].highBidder, bid);
+            bids[id].highBidder = msg.sender;
         }
-        vat.flux(ilk, address(this), bids[id].usr, bids[id].lot - lot);
+        cdpCore.transferCollateral(collateralType, address(this), bids[id].usr, bids[id].lot - lot);
 
         bids[id].lot = lot;
-        bids[id].tic = add(uint48(now), ttl);
+        bids[id].bidExpiry = add(uint48(now), ttl);
     }
-    function deal(uint256 id) external note {
-        require(bids[id].tic != 0 && (bids[id].tic < now || bids[id].end < now), "Flipper/not-finished");
+    function claimWinningBid(uint256 id) external note {
+        require(bids[id].bidExpiry != 0 && (bids[id].bidExpiry < now || bids[id].auctionEndTimestamp < now), "Flipper/not-finished");
         cat.claw(bids[id].tab);
-        vat.flux(ilk, address(this), bids[id].guy, bids[id].lot);
+        cdpCore.transferCollateral(collateralType, address(this), bids[id].highBidder, bids[id].lot);
         delete bids[id];
     }
 
-    function yank(uint256 id) external note auth {
-        require(bids[id].guy != address(0), "Flipper/guy-not-set");
-        require(bids[id].bid < bids[id].tab, "Flipper/already-dent-phase");
+    function closeBid(uint256 id) external note isAuthorized {
+        require(bids[id].highBidder != address(0), "Flipper/highBidder-not-set");
+        require(bids[id].bid < bids[id].tab, "Flipper/already-makeBidDecreaseLotSize-phase");
         cat.claw(bids[id].tab);
-        vat.flux(ilk, address(this), msg.sender, bids[id].lot);
-        vat.move(msg.sender, bids[id].guy, bids[id].bid);
+        cdpCore.transferCollateral(collateralType, address(this), msg.sender, bids[id].lot);
+        cdpCore.transfer(msg.sender, bids[id].highBidder, bids[id].bid);
         delete bids[id];
     }
 }

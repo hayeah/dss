@@ -2,101 +2,101 @@ pragma solidity >=0.5.12;
 
 import "ds-test/test.sol";
 
-import {Vat}     from "../vat.sol";
-import {Cat}     from "../cat.sol";
-import {Flipper} from "../flip.sol";
+import {CDPCore}     from "../cdpCore.sol";
+import {Liquidation}     from "../cat.sol";
+import {Flipper} from "../collateralForDaiAuction.sol";
 
 interface Hevm {
     function warp(uint256) external;
 }
 
 contract Guy {
-    Flipper flip;
+    Flipper collateralForDaiAuction;
     constructor(Flipper flip_) public {
-        flip = flip_;
+        collateralForDaiAuction = flip_;
     }
-    function hope(address usr) public {
-        Vat(address(flip.vat())).hope(usr);
+    function grantAccess(address usr) public {
+        CDPCore(address(collateralForDaiAuction.cdpCore())).grantAccess(usr);
     }
-    function tend(uint id, uint lot, uint bid) public {
-        flip.tend(id, lot, bid);
+    function makeBidIncreaseBidSize(uint id, uint lot, uint bid) public {
+        collateralForDaiAuction.makeBidIncreaseBidSize(id, lot, bid);
     }
-    function dent(uint id, uint lot, uint bid) public {
-        flip.dent(id, lot, bid);
+    function makeBidDecreaseLotSize(uint id, uint lot, uint bid) public {
+        collateralForDaiAuction.makeBidDecreaseLotSize(id, lot, bid);
     }
-    function deal(uint id) public {
-        flip.deal(id);
+    function claimWinningBid(uint id) public {
+        collateralForDaiAuction.claimWinningBid(id);
     }
     function try_tend(uint id, uint lot, uint bid)
         public returns (bool ok)
     {
-        string memory sig = "tend(uint256,uint256,uint256)";
-        (ok,) = address(flip).call(abi.encodeWithSignature(sig, id, lot, bid));
+        string memory sig = "makeBidIncreaseBidSize(uint256,uint256,uint256)";
+        (ok,) = address(collateralForDaiAuction).call(abi.encodeWithSignature(sig, id, lot, bid));
     }
     function try_dent(uint id, uint lot, uint bid)
         public returns (bool ok)
     {
-        string memory sig = "dent(uint256,uint256,uint256)";
-        (ok,) = address(flip).call(abi.encodeWithSignature(sig, id, lot, bid));
+        string memory sig = "makeBidDecreaseLotSize(uint256,uint256,uint256)";
+        (ok,) = address(collateralForDaiAuction).call(abi.encodeWithSignature(sig, id, lot, bid));
     }
     function try_deal(uint id)
         public returns (bool ok)
     {
-        string memory sig = "deal(uint256)";
-        (ok,) = address(flip).call(abi.encodeWithSignature(sig, id));
+        string memory sig = "claimWinningBid(uint256)";
+        (ok,) = address(collateralForDaiAuction).call(abi.encodeWithSignature(sig, id));
     }
     function try_tick(uint id)
         public returns (bool ok)
     {
-        string memory sig = "tick(uint256)";
-        (ok,) = address(flip).call(abi.encodeWithSignature(sig, id));
+        string memory sig = "restartAuction(uint256)";
+        (ok,) = address(collateralForDaiAuction).call(abi.encodeWithSignature(sig, id));
     }
     function try_yank(uint id)
         public returns (bool ok)
     {
-        string memory sig = "yank(uint256)";
-        (ok,) = address(flip).call(abi.encodeWithSignature(sig, id));
+        string memory sig = "closeBid(uint256)";
+        (ok,) = address(collateralForDaiAuction).call(abi.encodeWithSignature(sig, id));
     }
 }
 
 
 contract Gal {}
 
-contract Cat_ is Cat {
+contract Cat_ is Liquidation {
     uint256 constant public RAD = 10 ** 45;
     uint256 constant public MLN = 10 **  6;
 
-    constructor(address vat_) Cat(vat_) public {
+    constructor(address core_) Liquidation(core_) public {
         litter = 5 * MLN * RAD;
     }
 }
 
-contract Vat_ is Vat {
-    function mint(address usr, uint wad) public {
-        dai[usr] += wad;
+contract Vat_ is CDPCore {
+    function mint(address usr, uint fxp18Int) public {
+        dai[usr] += fxp18Int;
     }
     function dai_balance(address usr) public view returns (uint) {
         return dai[usr];
     }
-    bytes32 ilk;
+    bytes32 collateralType;
     function set_ilk(bytes32 ilk_) public {
-        ilk = ilk_;
+        collateralType = ilk_;
     }
     function gem_balance(address usr) public view returns (uint) {
-        return gem[ilk][usr];
+        return collateralToken[collateralType][usr];
     }
 }
 
 contract FlipTest is DSTest {
     Hevm hevm;
 
-    Vat_    vat;
+    Vat_    cdpCore;
     Cat_    cat;
-    Flipper flip;
+    Flipper collateralForDaiAuction;
 
     address ali;
     address bob;
-    address gal;
+    address incomeRecipient;
     address usr = address(0xacab);
 
     uint256 constant public RAY = 10 ** 27;
@@ -107,129 +107,129 @@ contract FlipTest is DSTest {
         hevm = Hevm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
         hevm.warp(604411200);
 
-        vat = new Vat_();
-        cat = new Cat_(address(vat));
+        cdpCore = new Vat_();
+        cat = new Cat_(address(cdpCore));
 
-        vat.init("gems");
-        vat.set_ilk("gems");
+        cdpCore.createNewCollateralType("collateralTokens");
+        cdpCore.set_ilk("collateralTokens");
 
-        flip = new Flipper(address(vat), address(cat), "gems");
-        cat.rely(address(flip));
+        collateralForDaiAuction = new Flipper(address(cdpCore), address(cat), "collateralTokens");
+        cat.authorizeAddress(address(collateralForDaiAuction));
 
-        ali = address(new Guy(flip));
-        bob = address(new Guy(flip));
-        gal = address(new Gal());
+        ali = address(new Guy(collateralForDaiAuction));
+        bob = address(new Guy(collateralForDaiAuction));
+        incomeRecipient = address(new Gal());
 
-        Guy(ali).hope(address(flip));
-        Guy(bob).hope(address(flip));
-        vat.hope(address(flip));
+        Guy(ali).grantAccess(address(collateralForDaiAuction));
+        Guy(bob).grantAccess(address(collateralForDaiAuction));
+        cdpCore.grantAccess(address(collateralForDaiAuction));
 
-        vat.slip("gems", address(this), 1000 ether);
-        vat.mint(ali, 200 ether);
-        vat.mint(bob, 200 ether);
+        cdpCore.modifyUsersCollateralBalance("collateralTokens", address(this), 1000 ether);
+        cdpCore.mint(ali, 200 ether);
+        cdpCore.mint(bob, 200 ether);
     }
-    function rad(uint wad) internal pure returns (uint) {
-        return wad * 10 ** 27;
+    function fxp45Int(uint fxp18Int) internal pure returns (uint) {
+        return fxp18Int * 10 ** 27;
     }
     function test_kick() public {
-        flip.kick({ lot: 100 ether
+        collateralForDaiAuction.startAuction({ lot: 100 ether
                   , tab: 50 ether
                   , usr: usr
-                  , gal: gal
+                  , incomeRecipient: incomeRecipient
                   , bid: 0
                   });
     }
     function testFail_tend_empty() public {
-        // can't tend on non-existent
-        flip.tend(42, 0, 0);
+        // can't makeBidIncreaseBidSize on non-existent
+        collateralForDaiAuction.makeBidIncreaseBidSize(42, 0, 0);
     }
     function test_tend() public {
-        uint id = flip.kick({ lot: 100 ether
+        uint id = collateralForDaiAuction.startAuction({ lot: 100 ether
                             , tab: 50 ether
                             , usr: usr
-                            , gal: gal
+                            , incomeRecipient: incomeRecipient
                             , bid: 0
                             });
 
-        Guy(ali).tend(id, 100 ether, 1 ether);
+        Guy(ali).makeBidIncreaseBidSize(id, 100 ether, 1 ether);
         // bid taken from bidder
-        assertEq(vat.dai_balance(ali),   199 ether);
-        // gal receives payment
-        assertEq(vat.dai_balance(gal),     1 ether);
+        assertEq(cdpCore.dai_balance(ali),   199 ether);
+        // incomeRecipient receives payment
+        assertEq(cdpCore.dai_balance(incomeRecipient),     1 ether);
 
-        Guy(bob).tend(id, 100 ether, 2 ether);
+        Guy(bob).makeBidIncreaseBidSize(id, 100 ether, 2 ether);
         // bid taken from bidder
-        assertEq(vat.dai_balance(bob), 198 ether);
+        assertEq(cdpCore.dai_balance(bob), 198 ether);
         // prev bidder refunded
-        assertEq(vat.dai_balance(ali), 200 ether);
-        // gal receives excess
-        assertEq(vat.dai_balance(gal),   2 ether);
+        assertEq(cdpCore.dai_balance(ali), 200 ether);
+        // incomeRecipient receives excess
+        assertEq(cdpCore.dai_balance(incomeRecipient),   2 ether);
 
         hevm.warp(now + 5 hours);
-        Guy(bob).deal(id);
+        Guy(bob).claimWinningBid(id);
         // bob gets the winnings
-        assertEq(vat.gem_balance(bob), 100 ether);
+        assertEq(cdpCore.gem_balance(bob), 100 ether);
     }
     function test_tend_later() public {
-        uint id = flip.kick({ lot: 100 ether
+        uint id = collateralForDaiAuction.startAuction({ lot: 100 ether
                             , tab: 50 ether
                             , usr: usr
-                            , gal: gal
+                            , incomeRecipient: incomeRecipient
                             , bid: 0
                             });
         hevm.warp(now + 5 hours);
 
-        Guy(ali).tend(id, 100 ether, 1 ether);
+        Guy(ali).makeBidIncreaseBidSize(id, 100 ether, 1 ether);
         // bid taken from bidder
-        assertEq(vat.dai_balance(ali), 199 ether);
-        // gal receives payment
-        assertEq(vat.dai_balance(gal),   1 ether);
+        assertEq(cdpCore.dai_balance(ali), 199 ether);
+        // incomeRecipient receives payment
+        assertEq(cdpCore.dai_balance(incomeRecipient),   1 ether);
     }
     function test_dent() public {
-        uint id = flip.kick({ lot: 100 ether
+        uint id = collateralForDaiAuction.startAuction({ lot: 100 ether
                             , tab: 50 ether
                             , usr: usr
-                            , gal: gal
+                            , incomeRecipient: incomeRecipient
                             , bid: 0
                             });
-        Guy(ali).tend(id, 100 ether,  1 ether);
-        Guy(bob).tend(id, 100 ether, 50 ether);
+        Guy(ali).makeBidIncreaseBidSize(id, 100 ether,  1 ether);
+        Guy(bob).makeBidIncreaseBidSize(id, 100 ether, 50 ether);
 
-        Guy(ali).dent(id,  95 ether, 50 ether);
-        // plop the gems
-        assertEq(vat.gem_balance(address(0xacab)), 5 ether);
-        assertEq(vat.dai_balance(ali),  150 ether);
-        assertEq(vat.dai_balance(bob),  200 ether);
+        Guy(ali).makeBidDecreaseLotSize(id,  95 ether, 50 ether);
+        // plop the collateralTokens
+        assertEq(cdpCore.gem_balance(address(0xacab)), 5 ether);
+        assertEq(cdpCore.dai_balance(ali),  150 ether);
+        assertEq(cdpCore.dai_balance(bob),  200 ether);
     }
     function test_tend_dent_same_bidder() public {
-       uint id = flip.kick({ lot: 100 ether
+       uint id = collateralForDaiAuction.startAuction({ lot: 100 ether
                             , tab: 200 ether
                             , usr: usr
-                            , gal: gal
+                            , incomeRecipient: incomeRecipient
                             , bid: 0
                             });
 
-        assertEq(vat.dai_balance(ali), 200 ether);
-        Guy(ali).tend(id, 100 ether, 190 ether);
-        assertEq(vat.dai_balance(ali), 10 ether);
-        Guy(ali).tend(id, 100 ether, 200 ether);
-        assertEq(vat.dai_balance(ali), 0);
-        Guy(ali).dent(id, 80 ether, 200 ether);
+        assertEq(cdpCore.dai_balance(ali), 200 ether);
+        Guy(ali).makeBidIncreaseBidSize(id, 100 ether, 190 ether);
+        assertEq(cdpCore.dai_balance(ali), 10 ether);
+        Guy(ali).makeBidIncreaseBidSize(id, 100 ether, 200 ether);
+        assertEq(cdpCore.dai_balance(ali), 0);
+        Guy(ali).makeBidDecreaseLotSize(id, 80 ether, 200 ether);
     }
     function test_beg() public {
-        uint id = flip.kick({ lot: 100 ether
+        uint id = collateralForDaiAuction.startAuction({ lot: 100 ether
                             , tab: 50 ether
                             , usr: usr
-                            , gal: gal
+                            , incomeRecipient: incomeRecipient
                             , bid: 0
                             });
         assertTrue( Guy(ali).try_tend(id, 100 ether, 1.00 ether));
         assertTrue(!Guy(bob).try_tend(id, 100 ether, 1.01 ether));
-        // high bidder is subject to beg
+        // high bidder is subject to minimumBidIncrease
         assertTrue(!Guy(ali).try_tend(id, 100 ether, 1.01 ether));
         assertTrue( Guy(bob).try_tend(id, 100 ether, 1.07 ether));
 
-        // can bid by less than beg at flip
+        // can bid by less than minimumBidIncrease at collateralForDaiAuction
         assertTrue( Guy(ali).try_tend(id, 100 ether, 49 ether));
         assertTrue( Guy(bob).try_tend(id, 100 ether, 50 ether));
 
@@ -238,44 +238,44 @@ contract FlipTest is DSTest {
         assertTrue( Guy(ali).try_dent(id,  95 ether, 50 ether));
     }
     function test_deal() public {
-        uint id = flip.kick({ lot: 100 ether
+        uint id = collateralForDaiAuction.startAuction({ lot: 100 ether
                             , tab: 50 ether
                             , usr: usr
-                            , gal: gal
+                            , incomeRecipient: incomeRecipient
                             , bid: 0
                             });
 
         // only after ttl
-        Guy(ali).tend(id, 100 ether, 1 ether);
+        Guy(ali).makeBidIncreaseBidSize(id, 100 ether, 1 ether);
         assertTrue(!Guy(bob).try_deal(id));
         hevm.warp(now + 4.1 hours);
         assertTrue( Guy(bob).try_deal(id));
 
-        uint ie = flip.kick({ lot: 100 ether
+        uint ie = collateralForDaiAuction.startAuction({ lot: 100 ether
                             , tab: 50 ether
                             , usr: usr
-                            , gal: gal
+                            , incomeRecipient: incomeRecipient
                             , bid: 0
                             });
 
-        // or after end
+        // or after auctionEndTimestamp
         hevm.warp(now + 44 hours);
-        Guy(ali).tend(ie, 100 ether, 1 ether);
+        Guy(ali).makeBidIncreaseBidSize(ie, 100 ether, 1 ether);
         assertTrue(!Guy(bob).try_deal(ie));
         hevm.warp(now + 1 days);
         assertTrue( Guy(bob).try_deal(ie));
     }
     function test_tick() public {
         // start an auction
-        uint id = flip.kick({ lot: 100 ether
+        uint id = collateralForDaiAuction.startAuction({ lot: 100 ether
                             , tab: 50 ether
                             , usr: usr
-                            , gal: gal
+                            , incomeRecipient: incomeRecipient
                             , bid: 0
                             });
-        // check no tick
+        // check no restartAuction
         assertTrue(!Guy(ali).try_tick(id));
-        // run past the end
+        // run past the auctionEndTimestamp
         hevm.warp(now + 2 weeks);
         // check not biddable
         assertTrue(!Guy(ali).try_tend(id, 100 ether, 1 ether));
@@ -286,10 +286,10 @@ contract FlipTest is DSTest {
     function test_no_deal_after_end() public {
         // if there are no bids and the auction ends, then it should not
         // be refundable to the creator. Rather, it ticks indefinitely.
-        uint id = flip.kick({ lot: 100 ether
+        uint id = collateralForDaiAuction.startAuction({ lot: 100 ether
                             , tab: 50 ether
                             , usr: usr
-                            , gal: gal
+                            , incomeRecipient: incomeRecipient
                             , bid: 0
                             });
         assertTrue(!Guy(ali).try_deal(id));
@@ -299,51 +299,51 @@ contract FlipTest is DSTest {
         assertTrue(!Guy(ali).try_deal(id));
     }
     function test_yank_tend() public {
-        uint id = flip.kick({ lot: 100 ether
-                            , tab: rad(50 ether)
+        uint id = collateralForDaiAuction.startAuction({ lot: 100 ether
+                            , tab: fxp45Int(50 ether)
                             , usr: usr
-                            , gal: gal
+                            , incomeRecipient: incomeRecipient
                             , bid: 0
                             });
 
-        Guy(ali).tend(id, 100 ether, 1 ether);
+        Guy(ali).makeBidIncreaseBidSize(id, 100 ether, 1 ether);
 
         // bid taken from bidder
-        assertEq(vat.dai_balance(ali), 199 ether);
-        assertEq(vat.dai_balance(gal),   1 ether);
+        assertEq(cdpCore.dai_balance(ali), 199 ether);
+        assertEq(cdpCore.dai_balance(incomeRecipient),   1 ether);
 
         // we have some amount of litter in the box
         assertEq(cat.litter(), 5 * MLN * RAD);
 
-        vat.mint(address(this), 1 ether);
-        flip.yank(id);
+        cdpCore.mint(address(this), 1 ether);
+        collateralForDaiAuction.closeBid(id);
 
         // bid is refunded to bidder from caller
-        assertEq(vat.dai_balance(ali),            200 ether);
-        assertEq(vat.dai_balance(address(this)),    0 ether);
+        assertEq(cdpCore.dai_balance(ali),            200 ether);
+        assertEq(cdpCore.dai_balance(address(this)),    0 ether);
 
-        // gems go to caller
-        assertEq(vat.gem_balance(address(this)), 1000 ether);
+        // collateralTokens go to caller
+        assertEq(cdpCore.gem_balance(address(this)), 1000 ether);
 
         // cat.scoop(tab) is called decrementing the litter accumulator
-        assertEq(cat.litter(), (5 * MLN * RAD) - rad(50 ether));
+        assertEq(cat.litter(), (5 * MLN * RAD) - fxp45Int(50 ether));
     }
     function test_yank_dent() public {
-        uint id = flip.kick({ lot: 100 ether
+        uint id = collateralForDaiAuction.startAuction({ lot: 100 ether
                             , tab: 50 ether
                             , usr: usr
-                            , gal: gal
+                            , incomeRecipient: incomeRecipient
                             , bid: 0
                             });
 
         // we have some amount of litter in the box
         assertEq(cat.litter(), 5 * MLN * RAD);
 
-        Guy(ali).tend(id, 100 ether,  1 ether);
-        Guy(bob).tend(id, 100 ether, 50 ether);
-        Guy(ali).dent(id,  95 ether, 50 ether);
+        Guy(ali).makeBidIncreaseBidSize(id, 100 ether,  1 ether);
+        Guy(bob).makeBidIncreaseBidSize(id, 100 ether, 50 ether);
+        Guy(ali).makeBidDecreaseLotSize(id,  95 ether, 50 ether);
 
-        // cannot yank in the dent phase
+        // cannot closeBid in the makeBidDecreaseLotSize phase
         assertTrue(!Guy(ali).try_yank(id));
 
         // we have same amount of litter in the box

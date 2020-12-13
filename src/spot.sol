@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-/// spot.sol -- Spotter
+/// maxDaiPerUnitOfCollateral.sol -- Spotter
 
-// This program is free software: you can redistribute it and/or modify
+// This program is transferCollateralFromCDP software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
@@ -19,8 +19,8 @@ pragma solidity >=0.5.12;
 
 import "./lib.sol";
 
-interface VatLike {
-    function file(bytes32, bytes32, uint) external;
+interface CDPCoreInterface {
+    function changeConfig(bytes32, bytes32, uint) external;
 }
 
 interface PipLike {
@@ -29,40 +29,40 @@ interface PipLike {
 
 contract Spotter is LibNote {
     // --- Auth ---
-    mapping (address => uint) public wards;
-    function rely(address guy) external note auth { wards[guy] = 1;  }
-    function deny(address guy) external note auth { wards[guy] = 0; }
-    modifier auth {
-        require(wards[msg.sender] == 1, "Spotter/not-authorized");
+    mapping (address => uint) public auths;
+    function authorizeAddress(address highBidder) external note isAuthorized { auths[highBidder] = 1;  }
+    function deauthorizeAddress(address highBidder) external note isAuthorized { auths[highBidder] = 0; }
+    modifier isAuthorized {
+        require(auths[msg.sender] == 1, "Spotter/not-authorized");
         _;
     }
 
     // --- Data ---
-    struct Ilk {
+    struct CollateralType {
         PipLike pip;  // Price Feed
-        uint256 mat;  // Liquidation ratio [ray]
+        uint256 mat;  // Liquidation ratio [fxp27Int]
     }
 
-    mapping (bytes32 => Ilk) public ilks;
+    mapping (bytes32 => CollateralType) public collateralTypes;
 
-    VatLike public vat;  // CDP Engine
-    uint256 public par;  // ref per dai [ray]
+    CDPCoreInterface public cdpCore;  // CDP Engine
+    uint256 public par;  // ref per dai [fxp27Int]
 
-    uint256 public live;
+    uint256 public isAlive;
 
     // --- Events ---
     event Poke(
-      bytes32 ilk,
-      bytes32 val,  // [wad]
-      uint256 spot  // [ray]
+      bytes32 collateralType,
+      bytes32 val,  // [fxp18Int]
+      uint256 maxDaiPerUnitOfCollateral  // [fxp27Int]
     );
 
     // --- Init ---
-    constructor(address vat_) public {
-        wards[msg.sender] = 1;
-        vat = VatLike(vat_);
+    constructor(address core_) public {
+        auths[msg.sender] = 1;
+        cdpCore = CDPCoreInterface(core_);
         par = ONE;
-        live = 1;
+        isAlive = 1;
     }
 
     // --- Math ---
@@ -76,31 +76,31 @@ contract Spotter is LibNote {
     }
 
     // --- Administration ---
-    function file(bytes32 ilk, bytes32 what, address pip_) external note auth {
-        require(live == 1, "Spotter/not-live");
-        if (what == "pip") ilks[ilk].pip = PipLike(pip_);
-        else revert("Spotter/file-unrecognized-param");
+    function changeConfig(bytes32 collateralType, bytes32 what, address pip_) external note isAuthorized {
+        require(isAlive == 1, "Spotter/not-isAlive");
+        if (what == "pip") collateralTypes[collateralType].pip = PipLike(pip_);
+        else revert("Spotter/changeConfig-unrecognized-param");
     }
-    function file(bytes32 what, uint data) external note auth {
-        require(live == 1, "Spotter/not-live");
+    function changeConfig(bytes32 what, uint data) external note isAuthorized {
+        require(isAlive == 1, "Spotter/not-isAlive");
         if (what == "par") par = data;
-        else revert("Spotter/file-unrecognized-param");
+        else revert("Spotter/changeConfig-unrecognized-param");
     }
-    function file(bytes32 ilk, bytes32 what, uint data) external note auth {
-        require(live == 1, "Spotter/not-live");
-        if (what == "mat") ilks[ilk].mat = data;
-        else revert("Spotter/file-unrecognized-param");
+    function changeConfig(bytes32 collateralType, bytes32 what, uint data) external note isAuthorized {
+        require(isAlive == 1, "Spotter/not-isAlive");
+        if (what == "mat") collateralTypes[collateralType].mat = data;
+        else revert("Spotter/changeConfig-unrecognized-param");
     }
 
     // --- Update value ---
-    function poke(bytes32 ilk) external {
-        (bytes32 val, bool has) = ilks[ilk].pip.peek();
-        uint256 spot = has ? rdiv(rdiv(mul(uint(val), 10 ** 9), par), ilks[ilk].mat) : 0;
-        vat.file(ilk, "spot", spot);
-        emit Poke(ilk, val, spot);
+    function poke(bytes32 collateralType) external {
+        (bytes32 val, bool has) = collateralTypes[collateralType].pip.peek();
+        uint256 maxDaiPerUnitOfCollateral = has ? rdiv(rdiv(mul(uint(val), 10 ** 9), par), collateralTypes[collateralType].mat) : 0;
+        cdpCore.changeConfig(collateralType, "maxDaiPerUnitOfCollateral", maxDaiPerUnitOfCollateral);
+        emit Poke(collateralType, val, maxDaiPerUnitOfCollateral);
     }
 
-    function cage() external note auth {
-        live = 0;
+    function disable() external note isAuthorized {
+        isAlive = 0;
     }
 }

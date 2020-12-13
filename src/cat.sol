@@ -4,7 +4,7 @@
 
 // Copyright (C) 2018 Rain <rainbreak@riseup.net>
 //
-// This program is free software: you can redistribute it and/or modify
+// This program is transferCollateralFromCDP software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
@@ -21,73 +21,73 @@ pragma solidity >=0.5.12;
 
 import "./lib.sol";
 
-interface Kicker {
-    function kick(address urn, address gal, uint256 tab, uint256 lot, uint256 bid)
+interface AuctionStarter {
+    function startAuction(address cdp, address incomeRecipient, uint256 tab, uint256 lot, uint256 bid)
         external returns (uint256);
 }
 
-interface VatLike {
-    function ilks(bytes32) external view returns (
-        uint256 Art,  // [wad]
-        uint256 rate, // [ray]
-        uint256 spot, // [ray]
-        uint256 line, // [rad]
-        uint256 dust  // [rad]
+interface CDPCoreInterface {
+    function collateralTypes(bytes32) external view returns (
+        uint256 totalStablecoinDebt,  // [fxp18Int]
+        uint256 debtMultiplierIncludingStabilityFee, // [fxp27Int]
+        uint256 maxDaiPerUnitOfCollateral, // [fxp27Int]
+        uint256 debtCeiling, // [fxp45Int]
+        uint256 dust  // [fxp45Int]
     );
-    function urns(bytes32,address) external view returns (
-        uint256 ink,  // [wad]
-        uint256 art   // [wad]
+    function cdps(bytes32,address) external view returns (
+        uint256 collateralBalance,  // [fxp18Int]
+        uint256 stablecoinDebt   // [fxp18Int]
     );
-    function grab(bytes32,address,address,address,int256,int256) external;
-    function hope(address) external;
-    function nope(address) external;
+    function liquidateCDP(bytes32,address,address,address,int256,int256) external;
+    function grantAccess(address) external;
+    function revokeAccess(address) external;
 }
 
-interface VowLike {
-    function fess(uint256) external;
+interface SettlementInterface {
+    function addDebtToDebtQueue(uint256) external;
 }
 
-contract Cat is LibNote {
+contract Liquidation is LibNote {
     // --- Auth ---
-    mapping (address => uint256) public wards;
-    function rely(address usr) external note auth { wards[usr] = 1; }
-    function deny(address usr) external note auth { wards[usr] = 0; }
-    modifier auth {
-        require(wards[msg.sender] == 1, "Cat/not-authorized");
+    mapping (address => uint256) public auths;
+    function authorizeAddress(address usr) external note isAuthorized { auths[usr] = 1; }
+    function deauthorizeAddress(address usr) external note isAuthorized { auths[usr] = 0; }
+    modifier isAuthorized {
+        require(auths[msg.sender] == 1, "Liquidation/not-authorized");
         _;
     }
 
     // --- Data ---
-    struct Ilk {
-        address flip;  // Liquidator
-        uint256 chop;  // Liquidation Penalty  [wad]
-        uint256 dunk;  // Liquidation Quantity [rad]
+    struct CollateralType {
+        address collateralForDaiAuction;  // Liquidator
+        uint256 liquidationPenalty;  // Liquidation Penalty  [fxp18Int]
+        uint256 dunk;  // Liquidation Quantity [fxp45Int]
     }
 
-    mapping (bytes32 => Ilk) public ilks;
+    mapping (bytes32 => CollateralType) public collateralTypes;
 
-    uint256 public live;   // Active Flag
-    VatLike public vat;    // CDP Engine
-    VowLike public vow;    // Debt Engine
-    uint256 public box;    // Max Dai out for liquidation        [rad]
-    uint256 public litter; // Balance of Dai out for liquidation [rad]
+    uint256 public isAlive;   // Active Flag
+    CDPCoreInterface public cdpCore;    // CDP Engine
+    SettlementInterface public settlement;    // Debt Engine
+    uint256 public box;    // Max Dai out for liquidation        [fxp45Int]
+    uint256 public litter; // Balance of Dai out for liquidation [fxp45Int]
 
     // --- Events ---
-    event Bite(
-      bytes32 indexed ilk,
-      address indexed urn,
-      uint256 ink,
-      uint256 art,
+    event LiquidateCdp(
+      bytes32 indexed collateralType,
+      address indexed cdp,
+      uint256 collateralBalance,
+      uint256 stablecoinDebt,
       uint256 tab,
-      address flip,
+      address collateralForDaiAuction,
       uint256 id
     );
 
     // --- Init ---
-    constructor(address vat_) public {
-        wards[msg.sender] = 1;
-        vat = VatLike(vat_);
-        live = 1;
+    constructor(address core_) public {
+        auths[msg.sender] = 1;
+        cdpCore = CDPCoreInterface(core_);
+        isAlive = 1;
     }
 
     // --- Math ---
@@ -107,81 +107,81 @@ contract Cat is LibNote {
     }
 
     // --- Administration ---
-    function file(bytes32 what, address data) external note auth {
-        if (what == "vow") vow = VowLike(data);
-        else revert("Cat/file-unrecognized-param");
+    function changeConfig(bytes32 what, address data) external note isAuthorized {
+        if (what == "settlement") settlement = SettlementInterface(data);
+        else revert("Liquidation/changeConfig-unrecognized-param");
     }
-    function file(bytes32 what, uint256 data) external note auth {
+    function changeConfig(bytes32 what, uint256 data) external note isAuthorized {
         if (what == "box") box = data;
-        else revert("Cat/file-unrecognized-param");
+        else revert("Liquidation/changeConfig-unrecognized-param");
     }
-    function file(bytes32 ilk, bytes32 what, uint256 data) external note auth {
-        if (what == "chop") ilks[ilk].chop = data;
-        else if (what == "dunk") ilks[ilk].dunk = data;
-        else revert("Cat/file-unrecognized-param");
+    function changeConfig(bytes32 collateralType, bytes32 what, uint256 data) external note isAuthorized {
+        if (what == "liquidationPenalty") collateralTypes[collateralType].liquidationPenalty = data;
+        else if (what == "dunk") collateralTypes[collateralType].dunk = data;
+        else revert("Liquidation/changeConfig-unrecognized-param");
     }
-    function file(bytes32 ilk, bytes32 what, address flip) external note auth {
-        if (what == "flip") {
-            vat.nope(ilks[ilk].flip);
-            ilks[ilk].flip = flip;
-            vat.hope(flip);
+    function changeConfig(bytes32 collateralType, bytes32 what, address collateralForDaiAuction) external note isAuthorized {
+        if (what == "collateralForDaiAuction") {
+            cdpCore.revokeAccess(collateralTypes[collateralType].collateralForDaiAuction);
+            collateralTypes[collateralType].collateralForDaiAuction = collateralForDaiAuction;
+            cdpCore.grantAccess(collateralForDaiAuction);
         }
-        else revert("Cat/file-unrecognized-param");
+        else revert("Liquidation/changeConfig-unrecognized-param");
     }
 
     // --- CDP Liquidation ---
-    function bite(bytes32 ilk, address urn) external returns (uint256 id) {
-        (,uint256 rate,uint256 spot,,uint256 dust) = vat.ilks(ilk);
-        (uint256 ink, uint256 art) = vat.urns(ilk, urn);
+    function liquidateCdp(bytes32 collateralType, address cdp) external returns (uint256 id) {
+        (,uint256 debtMultiplierIncludingStabilityFee,uint256 maxDaiPerUnitOfCollateral,,uint256 dust) = cdpCore.collateralTypes(collateralType);
+        (uint256 collateralBalance, uint256 stablecoinDebt) = cdpCore.cdps(collateralType, cdp);
 
-        require(live == 1, "Cat/not-live");
-        require(spot > 0 && mul(ink, spot) < mul(art, rate), "Cat/not-unsafe");
+        require(isAlive == 1, "Liquidation/not-isAlive");
+        require(maxDaiPerUnitOfCollateral > 0 && mul(collateralBalance, maxDaiPerUnitOfCollateral) < mul(stablecoinDebt, debtMultiplierIncludingStabilityFee), "Liquidation/not-unsafe");
 
-        Ilk memory milk = ilks[ilk];
-        uint256 dart;
+        CollateralType memory milk = collateralTypes[collateralType];
+        uint256 changeInDebt;
         {
             uint256 room = sub(box, litter);
 
             // test whether the remaining space in the litterbox is dusty
-            require(litter < box && room >= dust, "Cat/liquidation-limit-hit");
+            require(litter < box && room >= dust, "Liquidation/liquidation-limit-hit");
 
-            dart = min(art, mul(min(milk.dunk, room), WAD) / rate / milk.chop);
+            changeInDebt = min(stablecoinDebt, mul(min(milk.dunk, room), WAD) / debtMultiplierIncludingStabilityFee / milk.liquidationPenalty);
         }
 
-        uint256 dink = min(ink, mul(ink, dart) / art);
+        uint256 changeInCollateral = min(collateralBalance, mul(collateralBalance, changeInDebt) / stablecoinDebt);
 
-        require(dart >  0      && dink >  0     , "Cat/null-auction");
-        require(dart <= 2**255 && dink <= 2**255, "Cat/overflow"    );
+        require(changeInDebt >  0      && changeInCollateral >  0     , "Liquidation/null-auction");
+        require(changeInDebt <= 2**255 && changeInCollateral <= 2**255, "Liquidation/overflow"    );
 
         // This may leave the CDP in a dusty state
-        vat.grab(
-            ilk, urn, address(this), address(vow), -int256(dink), -int256(dart)
+        cdpCore.liquidateCDP(
+            collateralType, cdp, address(this), address(settlement), -int256(changeInCollateral), -int256(changeInDebt)
         );
-        vow.fess(mul(dart, rate));
+        settlement.addDebtToDebtQueue(mul(changeInDebt, debtMultiplierIncludingStabilityFee));
 
         { // Avoid stack too deep
-            // This calcuation will overflow if dart*rate exceeds ~10^14,
+            // This calcuation will overflow if changeInDebt*debtMultiplierIncludingStabilityFee exceeds ~10^14,
             // i.e. the maximum dunk is roughly 100 trillion DAI.
-            uint256 tab = mul(mul(dart, rate), milk.chop) / WAD;
+            uint256 tab = mul(mul(changeInDebt, debtMultiplierIncludingStabilityFee), milk.liquidationPenalty) / WAD;
             litter = add(litter, tab);
 
-            id = Kicker(milk.flip).kick({
-                urn: urn,
-                gal: address(vow),
+            id = AuctionStarter(milk.collateralForDaiAuction).startAuction({
+                cdp: cdp,
+                incomeRecipient: address(settlement),
                 tab: tab,
-                lot: dink,
+                lot: changeInCollateral,
                 bid: 0
             });
         }
 
-        emit Bite(ilk, urn, dink, dart, mul(dart, rate), milk.flip, id);
+        emit LiquidateCdp(collateralType, cdp, changeInCollateral, changeInDebt, mul(changeInDebt, debtMultiplierIncludingStabilityFee), milk.collateralForDaiAuction, id);
     }
 
-    function claw(uint256 rad) external note auth {
-        litter = sub(litter, rad);
+    function claw(uint256 fxp45Int) external note isAuthorized {
+        litter = sub(litter, fxp45Int);
     }
 
-    function cage() external note auth {
-        live = 0;
+    function disable() external note isAuthorized {
+        isAlive = 0;
     }
 }

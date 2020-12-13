@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-/// jug.sol -- Dai Lending Rate
+/// stabilityFeeDatabase.sol -- Dai Lending Rate
 
 // Copyright (C) 2018 Rain <rainbreak@riseup.net>
 //
-// This program is free software: you can redistribute it and/or modify
+// This program is transferCollateralFromCDP software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
@@ -21,39 +21,39 @@ pragma solidity >=0.5.12;
 
 import "./lib.sol";
 
-interface VatLike {
-    function ilks(bytes32) external returns (
-        uint256 Art,   // [wad]
-        uint256 rate   // [ray]
+interface CDPCoreInterface {
+    function collateralTypes(bytes32) external returns (
+        uint256 totalStablecoinDebt,   // [fxp18Int]
+        uint256 debtMultiplierIncludingStabilityFee   // [fxp27Int]
     );
-    function fold(bytes32,address,int) external;
+    function changeDebtMultiplier(bytes32,address,int) external;
 }
 
 contract Jug is LibNote {
     // --- Auth ---
-    mapping (address => uint) public wards;
-    function rely(address usr) external note auth { wards[usr] = 1; }
-    function deny(address usr) external note auth { wards[usr] = 0; }
-    modifier auth {
-        require(wards[msg.sender] == 1, "Jug/not-authorized");
+    mapping (address => uint) public auths;
+    function authorizeAddress(address usr) external note isAuthorized { auths[usr] = 1; }
+    function deauthorizeAddress(address usr) external note isAuthorized { auths[usr] = 0; }
+    modifier isAuthorized {
+        require(auths[msg.sender] == 1, "Jug/not-authorized");
         _;
     }
 
     // --- Data ---
-    struct Ilk {
-        uint256 duty;  // Collateral-specific, per-second stability fee contribution [ray]
-        uint256  rho;  // Time of last drip [unix epoch time]
+    struct CollateralType {
+        uint256 duty;  // Collateral-specific, per-second stability fee contribution [fxp27Int]
+        uint256  collateralTypeLastStabilityFeeCollectionTimestamp;  // Time of last increaseStabilityFee [unix epoch time]
     }
 
-    mapping (bytes32 => Ilk) public ilks;
-    VatLike                  public vat;   // CDP Engine
-    address                  public vow;   // Debt Engine
-    uint256                  public base;  // Global, per-second stability fee contribution [ray]
+    mapping (bytes32 => CollateralType) public collateralTypes;
+    CDPCoreInterface                  public cdpCore;   // CDP Engine
+    address                  public settlement;   // Debt Engine
+    uint256                  public base;  // Global, per-second stability fee contribution [fxp27Int]
 
     // --- Init ---
-    constructor(address vat_) public {
-        wards[msg.sender] = 1;
-        vat = VatLike(vat_);
+    constructor(address core_) public {
+        auths[msg.sender] = 1;
+        cdpCore = CDPCoreInterface(core_);
     }
 
     // --- Math ---
@@ -96,32 +96,32 @@ contract Jug is LibNote {
     }
 
     // --- Administration ---
-    function init(bytes32 ilk) external note auth {
-        Ilk storage i = ilks[ilk];
-        require(i.duty == 0, "Jug/ilk-already-init");
+    function createNewCollateralType(bytes32 collateralType) external note isAuthorized {
+        CollateralType storage i = collateralTypes[collateralType];
+        require(i.duty == 0, "Jug/collateralType-already-createNewCollateralType");
         i.duty = ONE;
-        i.rho  = now;
+        i.collateralTypeLastStabilityFeeCollectionTimestamp  = now;
     }
-    function file(bytes32 ilk, bytes32 what, uint data) external note auth {
-        require(now == ilks[ilk].rho, "Jug/rho-not-updated");
-        if (what == "duty") ilks[ilk].duty = data;
-        else revert("Jug/file-unrecognized-param");
+    function changeConfig(bytes32 collateralType, bytes32 what, uint data) external note isAuthorized {
+        require(now == collateralTypes[collateralType].collateralTypeLastStabilityFeeCollectionTimestamp, "Jug/collateralTypeLastStabilityFeeCollectionTimestamp-not-updated");
+        if (what == "duty") collateralTypes[collateralType].duty = data;
+        else revert("Jug/changeConfig-unrecognized-param");
     }
-    function file(bytes32 what, uint data) external note auth {
+    function changeConfig(bytes32 what, uint data) external note isAuthorized {
         if (what == "base") base = data;
-        else revert("Jug/file-unrecognized-param");
+        else revert("Jug/changeConfig-unrecognized-param");
     }
-    function file(bytes32 what, address data) external note auth {
-        if (what == "vow") vow = data;
-        else revert("Jug/file-unrecognized-param");
+    function changeConfig(bytes32 what, address data) external note isAuthorized {
+        if (what == "settlement") settlement = data;
+        else revert("Jug/changeConfig-unrecognized-param");
     }
 
     // --- Stability Fee Collection ---
-    function drip(bytes32 ilk) external note returns (uint rate) {
-        require(now >= ilks[ilk].rho, "Jug/invalid-now");
-        (, uint prev) = vat.ilks(ilk);
-        rate = rmul(rpow(add(base, ilks[ilk].duty), now - ilks[ilk].rho, ONE), prev);
-        vat.fold(ilk, vow, diff(rate, prev));
-        ilks[ilk].rho = now;
+    function increaseStabilityFee(bytes32 collateralType) external note returns (uint debtMultiplierIncludingStabilityFee) {
+        require(now >= collateralTypes[collateralType].collateralTypeLastStabilityFeeCollectionTimestamp, "Jug/invalid-now");
+        (, uint prev) = cdpCore.collateralTypes(collateralType);
+        debtMultiplierIncludingStabilityFee = rmul(rpow(add(base, collateralTypes[collateralType].duty), now - collateralTypes[collateralType].collateralTypeLastStabilityFeeCollectionTimestamp, ONE), prev);
+        cdpCore.changeDebtMultiplier(collateralType, settlement, diff(debtMultiplierIncludingStabilityFee, prev));
+        collateralTypes[collateralType].collateralTypeLastStabilityFeeCollectionTimestamp = now;
     }
 }

@@ -2,7 +2,7 @@
 
 // Copyright (C) 2017, 2018, 2019 dbrock, rain, mrchico
 
-// This program is free software: you can redistribute it and/or modify
+// This program is transferCollateralFromCDP software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
@@ -21,11 +21,11 @@ import "./lib.sol";
 
 contract Dai is LibNote {
     // --- Auth ---
-    mapping (address => uint) public wards;
-    function rely(address guy) external note auth { wards[guy] = 1; }
-    function deny(address guy) external note auth { wards[guy] = 0; }
-    modifier auth {
-        require(wards[msg.sender] == 1, "Dai/not-authorized");
+    mapping (address => uint) public auths;
+    function authorizeAddress(address highBidder) external note isAuthorized { auths[highBidder] = 1; }
+    function deauthorizeAddress(address highBidder) external note isAuthorized { auths[highBidder] = 0; }
+    modifier isAuthorized {
+        require(auths[msg.sender] == 1, "Dai/not-authorized");
         _;
     }
 
@@ -40,8 +40,8 @@ contract Dai is LibNote {
     mapping (address => mapping (address => uint)) public allowance;
     mapping (address => uint)                      public nonces;
 
-    event Approval(address indexed src, address indexed guy, uint wad);
-    event Transfer(address indexed src, address indexed dst, uint wad);
+    event Approval(address indexed src, address indexed highBidder, uint fxp18Int);
+    event Transfer(address indexed src, address indexed dst, uint fxp18Int);
 
     // --- Math ---
     function add(uint x, uint y) internal pure returns (uint z) {
@@ -57,7 +57,7 @@ contract Dai is LibNote {
     bytes32 public constant PERMIT_TYPEHASH = 0xea2aa0a1be11a07ed86d755c93467f4f82362b452371d1ba94d1715123511acb;
 
     constructor(uint256 chainId_) public {
-        wards[msg.sender] = 1;
+        auths[msg.sender] = 1;
         DOMAIN_SEPARATOR = keccak256(abi.encode(
             keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
             keccak256(bytes(name)),
@@ -68,52 +68,52 @@ contract Dai is LibNote {
     }
 
     // --- Token ---
-    function transfer(address dst, uint wad) external returns (bool) {
-        return transferFrom(msg.sender, dst, wad);
+    function transfer(address dst, uint fxp18Int) external returns (bool) {
+        return transferFrom(msg.sender, dst, fxp18Int);
     }
-    function transferFrom(address src, address dst, uint wad)
+    function transferFrom(address src, address dst, uint fxp18Int)
         public returns (bool)
     {
-        require(balanceOf[src] >= wad, "Dai/insufficient-balance");
+        require(balanceOf[src] >= fxp18Int, "Dai/insufficient-balance");
         if (src != msg.sender && allowance[src][msg.sender] != uint(-1)) {
-            require(allowance[src][msg.sender] >= wad, "Dai/insufficient-allowance");
-            allowance[src][msg.sender] = sub(allowance[src][msg.sender], wad);
+            require(allowance[src][msg.sender] >= fxp18Int, "Dai/insufficient-allowance");
+            allowance[src][msg.sender] = sub(allowance[src][msg.sender], fxp18Int);
         }
-        balanceOf[src] = sub(balanceOf[src], wad);
-        balanceOf[dst] = add(balanceOf[dst], wad);
-        emit Transfer(src, dst, wad);
+        balanceOf[src] = sub(balanceOf[src], fxp18Int);
+        balanceOf[dst] = add(balanceOf[dst], fxp18Int);
+        emit Transfer(src, dst, fxp18Int);
         return true;
     }
-    function mint(address usr, uint wad) external auth {
-        balanceOf[usr] = add(balanceOf[usr], wad);
-        totalSupply    = add(totalSupply, wad);
-        emit Transfer(address(0), usr, wad);
+    function mint(address usr, uint fxp18Int) external isAuthorized {
+        balanceOf[usr] = add(balanceOf[usr], fxp18Int);
+        totalSupply    = add(totalSupply, fxp18Int);
+        emit Transfer(address(0), usr, fxp18Int);
     }
-    function burn(address usr, uint wad) external {
-        require(balanceOf[usr] >= wad, "Dai/insufficient-balance");
+    function burn(address usr, uint fxp18Int) external {
+        require(balanceOf[usr] >= fxp18Int, "Dai/insufficient-balance");
         if (usr != msg.sender && allowance[usr][msg.sender] != uint(-1)) {
-            require(allowance[usr][msg.sender] >= wad, "Dai/insufficient-allowance");
-            allowance[usr][msg.sender] = sub(allowance[usr][msg.sender], wad);
+            require(allowance[usr][msg.sender] >= fxp18Int, "Dai/insufficient-allowance");
+            allowance[usr][msg.sender] = sub(allowance[usr][msg.sender], fxp18Int);
         }
-        balanceOf[usr] = sub(balanceOf[usr], wad);
-        totalSupply    = sub(totalSupply, wad);
-        emit Transfer(usr, address(0), wad);
+        balanceOf[usr] = sub(balanceOf[usr], fxp18Int);
+        totalSupply    = sub(totalSupply, fxp18Int);
+        emit Transfer(usr, address(0), fxp18Int);
     }
-    function approve(address usr, uint wad) external returns (bool) {
-        allowance[msg.sender][usr] = wad;
-        emit Approval(msg.sender, usr, wad);
+    function approve(address usr, uint fxp18Int) external returns (bool) {
+        allowance[msg.sender][usr] = fxp18Int;
+        emit Approval(msg.sender, usr, fxp18Int);
         return true;
     }
 
     // --- Alias ---
-    function push(address usr, uint wad) external {
-        transferFrom(msg.sender, usr, wad);
+    function push(address usr, uint fxp18Int) external {
+        transferFrom(msg.sender, usr, fxp18Int);
     }
-    function pull(address usr, uint wad) external {
-        transferFrom(usr, msg.sender, wad);
+    function pull(address usr, uint fxp18Int) external {
+        transferFrom(usr, msg.sender, fxp18Int);
     }
-    function move(address src, address dst, uint wad) external {
-        transferFrom(src, dst, wad);
+    function transfer(address src, address dst, uint fxp18Int) external {
+        transferFrom(src, dst, fxp18Int);
     }
 
     // --- Approve by signature ---
@@ -136,8 +136,8 @@ contract Dai is LibNote {
         require(holder == ecrecover(digest, v, r, s), "Dai/invalid-permit");
         require(expiry == 0 || now <= expiry, "Dai/permit-expired");
         require(nonce == nonces[holder]++, "Dai/invalid-nonce");
-        uint wad = allowed ? uint(-1) : 0;
-        allowance[holder][spender] = wad;
-        emit Approval(holder, spender, wad);
+        uint fxp18Int = allowed ? uint(-1) : 0;
+        allowance[holder][spender] = fxp18Int;
+        emit Approval(holder, spender, fxp18Int);
     }
 }

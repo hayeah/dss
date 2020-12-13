@@ -2,10 +2,10 @@ pragma solidity >=0.5.12;
 
 import "ds-test/test.sol";
 
-import {Flopper as Flop} from './flop.t.sol';
-import {Flapper as Flap} from './flap.t.sol';
-import {TestVat as  Vat} from './vat.t.sol';
-import {Vow}     from '../vow.sol';
+import {BadDebtAuction as Flop} from './flop.t.sol';
+import {SurplusAuction as Flap} from './flap.t.sol';
+import {TestVat as  CDPCore} from './cdpCore.t.sol';
+import {Settlement}     from '../settlement.sol';
 
 interface Hevm {
     function warp(uint256) external;
@@ -13,16 +13,16 @@ interface Hevm {
 
 contract Gem {
     mapping (address => uint256) public balanceOf;
-    function mint(address usr, uint rad) public {
-        balanceOf[usr] += rad;
+    function mint(address usr, uint fxp45Int) public {
+        balanceOf[usr] += fxp45Int;
     }
 }
 
 contract VowTest is DSTest {
     Hevm hevm;
 
-    Vat  vat;
-    Vow  vow;
+    CDPCore  cdpCore;
+    Settlement  settlement;
     Flop flop;
     Flap flap;
     Gem  gov;
@@ -31,56 +31,56 @@ contract VowTest is DSTest {
         hevm = Hevm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
         hevm.warp(604411200);
 
-        vat = new Vat();
+        cdpCore = new CDPCore();
 
         gov  = new Gem();
-        flop = new Flop(address(vat), address(gov));
-        flap = new Flap(address(vat), address(gov));
+        flop = new Flop(address(cdpCore), address(gov));
+        flap = new Flap(address(cdpCore), address(gov));
 
-        vow = new Vow(address(vat), address(flap), address(flop));
-        flap.rely(address(vow));
-        flop.rely(address(vow));
+        settlement = new Settlement(address(cdpCore), address(flap), address(flop));
+        flap.authorizeAddress(address(settlement));
+        flop.authorizeAddress(address(settlement));
 
-        vow.file("bump", rad(100 ether));
-        vow.file("sump", rad(100 ether));
-        vow.file("dump", 200 ether);
+        settlement.changeConfig("surplusAuctionLotSize", fxp45Int(100 ether));
+        settlement.changeConfig("debtAuctionLotSize", fxp45Int(100 ether));
+        settlement.changeConfig("dump", 200 ether);
 
-        vat.hope(address(flop));
+        cdpCore.grantAccess(address(flop));
     }
 
     function try_flog(uint era) internal returns (bool ok) {
-        string memory sig = "flog(uint256)";
-        (ok,) = address(vow).call(abi.encodeWithSignature(sig, era));
+        string memory sig = "removeDebtFromDebtQueue(uint256)";
+        (ok,) = address(settlement).call(abi.encodeWithSignature(sig, era));
     }
     function try_dent(uint id, uint lot, uint bid) internal returns (bool ok) {
-        string memory sig = "dent(uint256,uint256,uint256)";
+        string memory sig = "makeBidDecreaseLotSize(uint256,uint256,uint256)";
         (ok,) = address(flop).call(abi.encodeWithSignature(sig, id, lot, bid));
     }
-    function try_call(address addr, bytes calldata data) external returns (bool) {
+    function try_call(address highBidder, bytes calldata data) external returns (bool) {
         bytes memory _data = data;
         assembly {
-            let ok := call(gas(), addr, 0, add(_data, 0x20), mload(_data), 0, 0)
-            let free := mload(0x40)
-            mstore(free, ok)
-            mstore(0x40, add(free, 32))
-            revert(free, 32)
+            let ok := call(gas(), highBidder, 0, add(_data, 0x20), mload(_data), 0, 0)
+            let transferCollateralFromCDP := mload(0x40)
+            mstore(transferCollateralFromCDP, ok)
+            mstore(0x40, add(transferCollateralFromCDP, 32))
+            revert(transferCollateralFromCDP, 32)
         }
     }
-    function can_flap() public returns (bool) {
-        string memory sig = "flap()";
+    function can_startSurplusAuction() public returns (bool) {
+        string memory sig = "startSurplusAuction()";
         bytes memory data = abi.encodeWithSignature(sig);
 
-        bytes memory can_call = abi.encodeWithSignature("try_call(address,bytes)", vow, data);
+        bytes memory can_call = abi.encodeWithSignature("try_call(address,bytes)", settlement, data);
         (bool ok, bytes memory success) = address(this).call(can_call);
 
         ok = abi.decode(success, (bool));
         if (ok) return true;
     }
-    function can_flop() public returns (bool) {
-        string memory sig = "flop()";
+    function can_startBadDebtAuction() public returns (bool) {
+        string memory sig = "startBadDebtAuction()";
         bytes memory data = abi.encodeWithSignature(sig);
 
-        bytes memory can_call = abi.encodeWithSignature("try_call(address,bytes)", vow, data);
+        bytes memory can_call = abi.encodeWithSignature("try_call(address,bytes)", settlement, data);
         (bool ok, bytes memory success) = address(this).call(can_call);
 
         ok = abi.decode(success, (bool));
@@ -88,127 +88,127 @@ contract VowTest is DSTest {
     }
 
     uint constant ONE = 10 ** 27;
-    function rad(uint wad) internal pure returns (uint) {
-        return wad * ONE;
+    function fxp45Int(uint fxp18Int) internal pure returns (uint) {
+        return fxp18Int * ONE;
     }
 
-    function suck(address who, uint wad) internal {
-        vow.fess(rad(wad));
-        vat.init('');
-        vat.suck(address(vow), who, rad(wad));
+    function issueBadDebt(address who, uint fxp18Int) internal {
+        settlement.addDebtToDebtQueue(fxp45Int(fxp18Int));
+        cdpCore.createNewCollateralType('');
+        cdpCore.issueBadDebt(address(settlement), who, fxp45Int(fxp18Int));
     }
-    function flog(uint wad) internal {
-        suck(address(0), wad);  // suck dai into the zero address
-        vow.flog(now);
+    function removeDebtFromDebtQueue(uint fxp18Int) internal {
+        issueBadDebt(address(0), fxp18Int);  // issueBadDebt dai into the zero address
+        settlement.removeDebtFromDebtQueue(now);
     }
-    function heal(uint wad) internal {
-        vow.heal(rad(wad));
+    function settleDebtUsingSurplus(uint fxp18Int) internal {
+        settlement.settleDebtUsingSurplus(fxp45Int(fxp18Int));
     }
 
-    function test_change_flap_flop() public {
-        Flap newFlap = new Flap(address(vat), address(gov));
-        Flop newFlop = new Flop(address(vat), address(gov));
+    function test_change_flap_startBadDebtAuction() public {
+        Flap newFlap = new Flap(address(cdpCore), address(gov));
+        Flop newFlop = new Flop(address(cdpCore), address(gov));
 
-        newFlap.rely(address(vow));
-        newFlop.rely(address(vow));
+        newFlap.authorizeAddress(address(settlement));
+        newFlop.authorizeAddress(address(settlement));
 
-        assertEq(vat.can(address(vow), address(flap)), 1);
-        assertEq(vat.can(address(vow), address(newFlap)), 0);
+        assertEq(cdpCore.can(address(settlement), address(flap)), 1);
+        assertEq(cdpCore.can(address(settlement), address(newFlap)), 0);
 
-        vow.file('flapper', address(newFlap));
-        vow.file('flopper', address(newFlop));
+        settlement.changeConfig('surplusAuction', address(newFlap));
+        settlement.changeConfig('badDebtAuction', address(newFlop));
 
-        assertEq(address(vow.flapper()), address(newFlap));
-        assertEq(address(vow.flopper()), address(newFlop));
+        assertEq(address(settlement.surplusAuction()), address(newFlap));
+        assertEq(address(settlement.badDebtAuction()), address(newFlop));
 
-        assertEq(vat.can(address(vow), address(flap)), 0);
-        assertEq(vat.can(address(vow), address(newFlap)), 1);
+        assertEq(cdpCore.can(address(settlement), address(flap)), 0);
+        assertEq(cdpCore.can(address(settlement), address(newFlap)), 1);
     }
 
     function test_flog_wait() public {
-        assertEq(vow.wait(), 0);
-        vow.file('wait', uint(100 seconds));
-        assertEq(vow.wait(), 100 seconds);
+        assertEq(settlement.debtQueueLength(), 0);
+        settlement.changeConfig('debtQueueLength', uint(100 seconds));
+        assertEq(settlement.debtQueueLength(), 100 seconds);
 
-        uint tic = now;                                                                                                                                                       
-        vow.fess(100 ether);                                                     
-        hevm.warp(tic + 99 seconds);                                             
-        assertTrue(!try_flog(tic) );                                             
-        hevm.warp(tic + 100 seconds);                                            
-        assertTrue( try_flog(tic) ); 
+        uint bidExpiry = now;                                                                                                                                                       
+        settlement.addDebtToDebtQueue(100 ether);                                                     
+        hevm.warp(bidExpiry + 99 seconds);                                             
+        assertTrue(!try_flog(bidExpiry) );                                             
+        hevm.warp(bidExpiry + 100 seconds);                                            
+        assertTrue( try_flog(bidExpiry) ); 
     }
 
-    function test_no_reflop() public {
-        flog(100 ether);
-        assertTrue( can_flop() );
-        vow.flop();
-        assertTrue(!can_flop() );
+    function test_no_restartBadDebtAuction() public {
+        removeDebtFromDebtQueue(100 ether);
+        assertTrue( can_startBadDebtAuction() );
+        settlement.startBadDebtAuction();
+        assertTrue(!can_startBadDebtAuction() );
     }
 
     function test_no_flop_pending_joy() public {
-        flog(200 ether);
+        removeDebtFromDebtQueue(200 ether);
 
-        vat.mint(address(vow), 100 ether);
-        assertTrue(!can_flop() );
+        cdpCore.mint(address(settlement), 100 ether);
+        assertTrue(!can_startBadDebtAuction() );
 
-        heal(100 ether);
-        assertTrue( can_flop() );
+        settleDebtUsingSurplus(100 ether);
+        assertTrue( can_startBadDebtAuction() );
     }
 
-    function test_flap() public {
-        vat.mint(address(vow), 100 ether);
-        assertTrue( can_flap() );
+    function test_startSurplusAuction() public {
+        cdpCore.mint(address(settlement), 100 ether);
+        assertTrue( can_startSurplusAuction() );
     }
 
     function test_no_flap_pending_sin() public {
-        vow.file("bump", uint256(0 ether));
-        flog(100 ether);
+        settlement.changeConfig("surplusAuctionLotSize", uint256(0 ether));
+        removeDebtFromDebtQueue(100 ether);
 
-        vat.mint(address(vow), 50 ether);
-        assertTrue(!can_flap() );
+        cdpCore.mint(address(settlement), 50 ether);
+        assertTrue(!can_startSurplusAuction() );
     }
     function test_no_flap_nonzero_woe() public {
-        vow.file("bump", uint256(0 ether));
-        flog(100 ether);
-        vat.mint(address(vow), 50 ether);
-        assertTrue(!can_flap() );
+        settlement.changeConfig("surplusAuctionLotSize", uint256(0 ether));
+        removeDebtFromDebtQueue(100 ether);
+        cdpCore.mint(address(settlement), 50 ether);
+        assertTrue(!can_startSurplusAuction() );
     }
-    function test_no_flap_pending_flop() public {
-        flog(100 ether);
-        vow.flop();
+    function test_no_flap_pending_startBadDebtAuction() public {
+        removeDebtFromDebtQueue(100 ether);
+        settlement.startBadDebtAuction();
 
-        vat.mint(address(vow), 100 ether);
+        cdpCore.mint(address(settlement), 100 ether);
 
-        assertTrue(!can_flap() );
+        assertTrue(!can_startSurplusAuction() );
     }
     function test_no_flap_pending_heal() public {
-        flog(100 ether);
-        uint id = vow.flop();
+        removeDebtFromDebtQueue(100 ether);
+        uint id = settlement.startBadDebtAuction();
 
-        vat.mint(address(this), 100 ether);
-        flop.dent(id, 0 ether, rad(100 ether));
+        cdpCore.mint(address(this), 100 ether);
+        flop.makeBidDecreaseLotSize(id, 0 ether, fxp45Int(100 ether));
 
-        assertTrue(!can_flap() );
+        assertTrue(!can_startSurplusAuction() );
     }
 
-    function test_no_surplus_after_good_flop() public {
-        flog(100 ether);
-        uint id = vow.flop();
-        vat.mint(address(this), 100 ether);
+    function test_no_surplus_after_good_startBadDebtAuction() public {
+        removeDebtFromDebtQueue(100 ether);
+        uint id = settlement.startBadDebtAuction();
+        cdpCore.mint(address(this), 100 ether);
 
-        flop.dent(id, 0 ether, rad(100 ether));  // flop succeeds..
+        flop.makeBidDecreaseLotSize(id, 0 ether, fxp45Int(100 ether));  // flop succeeds..
 
-        assertTrue(!can_flap() );
+        assertTrue(!can_startSurplusAuction() );
     }
 
     function test_multiple_flop_dents() public {
-        flog(100 ether);
-        uint id = vow.flop();
+        removeDebtFromDebtQueue(100 ether);
+        uint id = settlement.startBadDebtAuction();
 
-        vat.mint(address(this), 100 ether);
-        assertTrue(try_dent(id, 2 ether,  rad(100 ether)));
+        cdpCore.mint(address(this), 100 ether);
+        assertTrue(try_dent(id, 2 ether,  fxp45Int(100 ether)));
 
-        vat.mint(address(this), 100 ether);
-        assertTrue(try_dent(id, 1 ether,  rad(100 ether)));
+        cdpCore.mint(address(this), 100 ether);
+        assertTrue(try_dent(id, 1 ether,  fxp45Int(100 ether)));
     }
 }
